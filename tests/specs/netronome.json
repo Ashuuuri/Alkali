@@ -44,7 +44,7 @@
     {
       "id": "LMEM",
       "scope": "per_me",
-      "size_bytes": 4096,
+      "size_bytes": 1024,
       "latency_cycles": 4
     },
     {

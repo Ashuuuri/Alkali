@@ -36,13 +36,8 @@ NetronomeSpec NetronomeSpec::defaults() {
     {"default",   1},
   };
 
-  // Memory layers matching real Agilio CX hardware (used for future queries)
-  s.memoryLayers = {
-    {"LMEM", "per_me",    4096LL,         4},
-    {"CLS",  "per_island", 65536LL,       16},
-    {"CTM",  "per_island", 262144LL,      40},
-    {"EMEM", "chip",       4294967296LL, 300},
-  };
+  // Strict replica of original behaviour: no memory layer info.
+  s.memoryLayers = {};
 
   return s;
 }
