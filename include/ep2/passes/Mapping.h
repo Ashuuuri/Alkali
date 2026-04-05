@@ -212,7 +212,7 @@ class NetronomePerformanceModel : public PerformanceModel {
 // Generic json model
 
 // Loop based searching
-static const int PIPELINE_EXTRA_SEARCH = 1;
+static const int PIPELINE_EXTRA_SEARCH = 10;
 
 // RAII guard to ensure that pipeline is mapped
 class PipelineMapper {
