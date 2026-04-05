@@ -185,8 +185,14 @@ class NetronomePerformanceModel : public PerformanceModel {
 
   int getCommunicationCost(std::vector<std::string> &froms,
                            std::vector<std::string> &tos) override {
-    // TODO: wire up in follow-up PR
-    return 0;
+    if (froms.empty() || tos.empty())
+      return 0;
+    auto fi = spec_.meIsland.find(froms[0]);
+    auto ti = spec_.meIsland.find(tos[0]);
+    if (fi == spec_.meIsland.end() || ti == spec_.meIsland.end())
+      return 0;
+    return (fi->second == ti->second) ? spec_.intraIslandCost
+                                      : spec_.interIslandCost;
   }
 
   int getLatencyTarget() override { return spec_.latencyTarget; }
