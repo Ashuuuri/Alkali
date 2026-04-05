@@ -1272,7 +1272,10 @@ void PipelineHandlerPass::runOnOperation() {
     if (target.getValue() == "fpga") {
       model = std::make_unique<FPGAPerformanceModel>();
     } else if (target.getValue() == "netronome") {
-      model = std::make_unique<NetronomePerformanceModel>();
+      if (!specPath.getValue().empty())
+        model = std::make_unique<NetronomePerformanceModel>(specPath.getValue());
+      else
+        model = std::make_unique<NetronomePerformanceModel>();
     } else {
       llvm::errs() << "Unknown target: " << target.getValue() << '\n';
       signalPassFailure();
