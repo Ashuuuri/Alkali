@@ -197,15 +197,20 @@ class NetronomePerformanceModel : public PerformanceModel {
     int64_t tableBytes =
         static_cast<int64_t>(numEntries) * ((entryBits + 7) / 8);
 
+    // Hot tables get relaxed size thresholds to land in faster memory.
+    // relaxFactor: hot=0.0 → 1.0 (no change), hot=1.0 → 2.0 (2× headroom)
+    double relaxFactor = 1.0 + workload_.hotKeyRatio;
+
     int result = spec_.memoryLayers.back().latencyCycles;  // slowest if nothing fits
     for (auto &layer : spec_.memoryLayers) {
-      if (tableBytes <= layer.sizeBytes) {
+      if (tableBytes <= static_cast<int64_t>(layer.sizeBytes * relaxFactor)) {
         result = layer.latencyCycles;
         break;
       }
     }
     llvm::errs() << "[memLatency] table size=" << tableBytes
-                 << "B -> layer latency=" << result << "\n";
+                 << "B relaxFactor=" << relaxFactor
+                 << " -> layer latency=" << result << "\n";
     return result;
   }
 
@@ -225,8 +230,9 @@ class NetronomePerformanceModel : public PerformanceModel {
     int64_t tableBytes =
         static_cast<int64_t>(numEntries) * ((entryBits + 7) / 8);
 
+    double relaxFactor = 1.0 + workload_.hotKeyRatio;
     for (auto &layer : spec_.memoryLayers)
-      if (tableBytes <= layer.sizeBytes)
+      if (tableBytes <= static_cast<int64_t>(layer.sizeBytes * relaxFactor))
         return layer.latencyCycles;
     return spec_.memoryLayers.back().latencyCycles;
   }
