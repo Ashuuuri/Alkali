@@ -56,7 +56,9 @@ using SearchPair = std::pair<ep2::FuncOp, PolicyP>;
 using SearchDirection = llvm::DenseMap<ep2::FuncOp, PolicyP>;
 
 // A list of pipeline policies
-std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc);
+std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc,
+                                                    double avgPktBytes = 64.0,
+                                                    double hotKeyRatio = 0.0);
 bool isTableClean(ep2::FuncOp funcOp);
 
 void kcutPolicy(Operation * moduleOp, int k, FuncOp targetFunc);
@@ -302,9 +304,16 @@ class PipelineCutExplorer {
 
 class BottleneckExplorer : public PipelineCutExplorer {
   public:
+    double avgPktBytes = 64.0;
+    double hotKeyRatio = 0.0;
+
+    BottleneckExplorer() = default;
+    BottleneckExplorer(double avgPkt, double hot)
+        : avgPktBytes(avgPkt), hotKeyRatio(hot) {}
+
     std::vector<HandlerPipeline> next(HandlerPipeline &pipeline, int bottleneckIndex) override {
         // first try table cut, if it is not working, try kcut
-        auto [success, newFuncs] = tableCut(pipeline[bottleneckIndex]);
+        auto [success, newFuncs] = tableCut(pipeline[bottleneckIndex], avgPktBytes, hotKeyRatio);
         if (success) {
             auto newPipeline = pipeline;
 
