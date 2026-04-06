@@ -171,7 +171,65 @@ class NetronomePerformanceModel : public PerformanceModel {
       : spec_(specPath.empty() ? NetronomeSpec::defaults() : NetronomeSpec::load(specPath)),
         workload_(WorkloadSpec::load(workloadPath)) {}
 
-  int getAccessOverhead(ep2::GlobalOp globalOp) override { return 0; }
+  // Returns memory latency (cycles) for the table accessed by importOp,
+  // based on table size and spec_.memoryLayers placement rules.
+  // Returns 0 when memoryLayers is empty (defaults path → backward-compat).
+  int getTableMemLatency(ep2::GlobalImportOp importOp) {
+    if (spec_.memoryLayers.empty())
+      return 0;
+    auto tableType = importOp.getOutput().getType().dyn_cast<ep2::TableType>();
+    if (!tableType)
+      return spec_.memoryLayers.back().latencyCycles;  // fallback: slowest
+
+    int numEntries = tableType.getSize();
+    int entryBits  = 0;
+    auto accBits   = [&](mlir::Type ty) {
+      if (auto intTy = ty.dyn_cast<mlir::IntegerType>())
+        entryBits += intTy.getWidth();
+      else if (auto structTy = ty.dyn_cast<ep2::StructType>())
+        for (auto elemTy : structTy.getElementTypes())
+          if (auto iTy = elemTy.dyn_cast<mlir::IntegerType>())
+            entryBits += iTy.getWidth();
+    };
+    accBits(tableType.getKeyType());
+    accBits(tableType.getValueType());
+
+    int64_t tableBytes =
+        static_cast<int64_t>(numEntries) * ((entryBits + 7) / 8);
+
+    int result = spec_.memoryLayers.back().latencyCycles;  // slowest if nothing fits
+    for (auto &layer : spec_.memoryLayers) {
+      if (tableBytes <= layer.sizeBytes) {
+        result = layer.latencyCycles;
+        break;
+      }
+    }
+    llvm::errs() << "[memLatency] table size=" << tableBytes
+                 << "B -> layer latency=" << result << "\n";
+    return result;
+  }
+
+  int getAccessOverhead(ep2::GlobalOp globalOp) override {
+    if (spec_.memoryLayers.empty())
+      return 0;
+    auto tableType = globalOp.getOutput().getType().dyn_cast<ep2::TableType>();
+    if (!tableType)
+      return 0;
+
+    int numEntries = tableType.getSize();
+    int entryBits  = 0;
+    if (auto intTy = tableType.getKeyType().dyn_cast<mlir::IntegerType>())
+      entryBits += intTy.getWidth();
+    if (auto intTy = tableType.getValueType().dyn_cast<mlir::IntegerType>())
+      entryBits += intTy.getWidth();
+    int64_t tableBytes =
+        static_cast<int64_t>(numEntries) * ((entryBits + 7) / 8);
+
+    for (auto &layer : spec_.memoryLayers)
+      if (tableBytes <= layer.sizeBytes)
+        return layer.latencyCycles;
+    return spec_.memoryLayers.back().latencyCycles;
+  }
 
   int getLatency(ep2::FuncOp funcOp) override {
     int latency = 0;
@@ -180,12 +238,21 @@ class NetronomePerformanceModel : public PerformanceModel {
 
     funcOp.walk([&](Operation *op) {
       llvm::TypeSwitch<Operation *>(op)
-          .Case<ep2::LookupOp>([&](Operation *) {
-            // Hot keys hit fast memory (~20c), cold keys hit slow memory (~100c)
-            latency += static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
+          .Case<ep2::LookupOp>([&](ep2::LookupOp lookupOp) {
+            int instrCost = static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
+            int memCost   = 0;
+            if (auto importOp =
+                    lookupOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+              memCost = getTableMemLatency(importOp);
+            latency += instrCost + memCost;
           })
-          .Case<ep2::UpdateOp>([&](Operation *) {
-            latency += static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
+          .Case<ep2::UpdateOp>([&](ep2::UpdateOp updateOp) {
+            int instrCost = static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
+            int memCost   = 0;
+            if (auto importOp =
+                    updateOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+              memCost = getTableMemLatency(importOp);
+            latency += instrCost + memCost;
           })
           .Case<ep2::ExtractOp>([&](Operation *) {
             // Larger packets take more cycles to extract (1B per 8 cycles overhead)
