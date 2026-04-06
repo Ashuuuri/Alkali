@@ -10,19 +10,19 @@
 
 **Summary:** latency min=34 max=34 median=34; CU min=6 max=6 median=6
 
-## 20mpps_1500B  (target=40)
+## 20mpps_4flows  (target=40)
 
 | Run | Latency | Stages | CU total | Distribution |
 |-----|---------|--------|----------|--------------|
-| 1 | 34 | 1 | 6 | 6 |
-| 2 | 34 | 1 | 6 | 6 |
-| 3 | 34 | 1 | 6 | 6 |
+| 1 | 52 | 1 | 4 | 4 |
+| 2 | 52 | 1 | 4 | 4 |
+| 3 | 52 | 1 | 4 | 4 |
 
-**Summary:** latency min=34 max=34 median=34; CU min=6 max=6 median=6
+**Summary:** latency min=52 max=52 median=52; CU min=4 max=4 median=4
 
 ## Cross-workload summary
 
 | Workload | target | Latency (median) | CU (median) | Stages (median) |
 |----------|--------|-----------------|-------------|-----------------|
 | 20mpps_64B | 40 | 34 | 6 | 1 |
-| 20mpps_1500B | 40 | 34 | 6 | 1 |
+| 20mpps_4flows | 40 | 52 | 4 | 1 |

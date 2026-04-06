@@ -4,36 +4,47 @@
 
 | Run | Latency | Stages | CU total | Distribution |
 |-----|---------|--------|----------|--------------|
-| 1 | 38 | 4 | 29 | 9+8+6+6 |
-| 2 | 37 | 4 | 29 | 9+8+6+6 |
-| 3 | 38 | 4 | 28 | 6+8+6+8 |
+| 1 | 39 | 4 | 29 | 11+8+4+6 |
+| 2 | 39 | 4 | 29 | 4+6+8+11 |
+| 3 | 39 | 4 | 29 | 11+8+4+6 |
 
-**Summary:** latency min=37 max=38 median=38; CU min=28 max=29 median=29
+**Summary:** latency min=39 max=39 median=39; CU min=29 max=29 median=29
 
-## 20mpps_hot50  (target=40)
-
-| Run | Latency | Stages | CU total | Distribution |
-|-----|---------|--------|----------|--------------|
-| 1 | 38 | 4 | 20 | 7+4+5+4 |
-| 2 | 38 | 4 | 20 | 7+4+5+4 |
-| 3 | 38 | 4 | 19 | 4+4+6+5 |
-
-**Summary:** latency min=38 max=38 median=38; CU min=19 max=20 median=20
-
-## 20mpps_hot90  (target=40)
+## 20mpps_4flows  (target=40)
 
 | Run | Latency | Stages | CU total | Distribution |
 |-----|---------|--------|----------|--------------|
-| 1 | 35 | 4 | 11 | 4+3+2+2 |
-| 2 | 38 | 4 | 10 | 3+3+2+2 |
-| 3 | 38 | 4 | 11 | 3+3+2+3 |
+| 1 | 81 | 4 | 16 | 4+4+4+4 |
+| 2 | 76 | 4 | 16 | 4+4+4+4 |
+| 3 | 103 | 4 | 16 | 4+4+4+4 |
 
-**Summary:** latency min=35 max=38 median=38; CU min=10 max=11 median=11
+**Summary:** latency min=76 max=103 median=81; CU min=16 max=16 median=16
+
+## 20mpps_16flows  (target=40)
+
+| Run | Latency | Stages | CU total | Distribution |
+|-----|---------|--------|----------|--------------|
+| 1 | 38 | 4 | 28 | 6+8+6+8 |
+| 2 | 38 | 4 | 28 | 6+8+6+8 |
+| 3 | 39 | 4 | 29 | 9+8+6+6 |
+
+**Summary:** latency min=38 max=39 median=38; CU min=28 max=29 median=28
+
+## 20mpps_64flows  (target=40)
+
+| Run | Latency | Stages | CU total | Distribution |
+|-----|---------|--------|----------|--------------|
+| 1 | 39 | 4 | 29 | 9+8+6+6 |
+| 2 | 38 | 4 | 28 | 6+8+6+8 |
+| 3 | 39 | 4 | 29 | 9+8+6+6 |
+
+**Summary:** latency min=38 max=39 median=39; CU min=28 max=29 median=29
 
 ## Cross-workload summary
 
 | Workload | target | Latency (median) | CU (median) | Stages (median) |
 |----------|--------|-----------------|-------------|-----------------|
-| 20mpps_64B | 40 | 38 | 29 | 4 |
-| 20mpps_hot50 | 40 | 38 | 20 | 4 |
-| 20mpps_hot90 | 40 | 38 | 11 | 4 |
+| 20mpps_64B | 40 | 39 | 29 | 4 |
+| 20mpps_4flows | 40 | 81 | 16 | 4 |
+| 20mpps_16flows | 40 | 38 | 28 | 4 |
+| 20mpps_64flows | 40 | 39 | 29 | 4 |

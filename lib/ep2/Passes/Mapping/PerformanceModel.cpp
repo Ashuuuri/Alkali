@@ -238,6 +238,12 @@ PerformanceModel::getMapping(llvm::SmallVector<ep2::FuncOp> &ops) {
         if (!isTableClean(ops[idx]) && unitMap[idx].size() >= 1)
           continue;
 
+        // Don't replicate beyond the number of active flows — extra replicas
+        // would receive no traffic since flows are hash-partitioned across replicas.
+        int flowCap = getActiveFlows();
+        if (flowCap > 0 && static_cast<int>(unitMap[idx].size()) >= flowCap)
+          continue;
+
         unitMap[idx].push_back(unit);
 
         assigned = true;

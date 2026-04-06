@@ -119,6 +119,7 @@ class PerformanceModel {
                                    std::vector<std::string> &tos) = 0;
   virtual int getLatencyTarget() = 0;
   virtual std::vector<std::string> getComputeUnits() = 0;
+  virtual int getActiveFlows() { return 0; }  // 0 = no limit
 
 
   // This function provides a simple, greedy mapping method for a sequence of handlers
@@ -220,6 +221,8 @@ class NetronomePerformanceModel : public PerformanceModel {
     }
     return spec_.latencyTarget;
   }
+
+  int getActiveFlows() override { return workload_.activeFlows; }
 
   std::vector<std::string> getComputeUnits() override {
     return spec_.computeUnitIds;
