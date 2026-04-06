@@ -40,8 +40,10 @@ EXTRACT_PY=./scripts/extract_struct_def.py
 cc -E $C_INPUT_FILE -o $C_PREPROCESS
 python3 $EXTRACT_PY $C_INPUT_FILE -o cinput.struct.json
 $CLANG_BIN_DIR/clang -S -emit-llvm $C_PREPROCESS -o $C_LLVM_FILE
+# Strip noinline/optnone so the MLIR --inline pass can inline static helper functions.
+sed -i 's/ noinline//; s/ optnone//' $C_LLVM_FILE
 $CLANG_BIN_DIR/mlir-translate  --import-llvm $C_LLVM_FILE -o $C_MLIR_FILE
-$BIN_DIR/ep2c-opt $C_MLIR_FILE --convert-scf-to-cf -cse -o cinput2.mlir
+$BIN_DIR/ep2c-opt $C_MLIR_FILE --inline --convert-scf-to-cf -cse -o cinput2.mlir
 
 $BIN_DIR/ep2c-opt cinput2.mlir --ep2-lift-llvm="struct-desc=cinput.struct.json" $OPTIONS -cse -cse -canonicalize --ep2-context-to-mem="transform-extern=true" -o $OUT_FILE
 

@@ -965,6 +965,9 @@ struct CmpPattern : public OpConversionPattern<ep2::CmpOp> {
       case -::ep2::tok_cmp_eq:
         predicate = LLVM::ICmpPredicate::eq;
         break;
+      case 43: // NE extension (see LiftLLVMPass)
+        predicate = LLVM::ICmpPredicate::ne;
+        break;
       case -::ep2::tok_cmp_le:
         predicate = LLVM::ICmpPredicate::sle;
         break;

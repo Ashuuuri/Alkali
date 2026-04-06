@@ -680,6 +680,9 @@ struct CmpPattern : public OpConversionPattern<ep2::CmpOp> {
       case -::ep2::tok_cmp_eq:
         cmpType = emitc::CmpPredicate::eq;
         break;
+      case 43: // NE extension (see LiftLLVMPass)
+        cmpType = emitc::CmpPredicate::ne;
+        break;
       case -::ep2::tok_cmp_le:
         cmpType = emitc::CmpPredicate::le;
         break;
@@ -713,6 +716,63 @@ struct SelectPattern : public OpConversionPattern<arith::SelectOp> {
     mlir::ArrayAttr args;
     mlir::ArrayAttr templ_args;
     rewriter.replaceOpWithNewOp<emitc::CallOp>(op, resTypes, rewriter.getStringAttr("__ep2_intrin_ternary"), args, templ_args, adaptor.getOperands());
+    return success();
+  }
+};
+
+// Convert remaining LLVM arithmetic ops that ep2-lift-llvm doesn't convert
+// to EP2 ops (e.g. bitwise ops without EP2 equivalents).
+struct LLVMMulPattern : public OpConversionPattern<LLVM::MulOp> {
+  using OpConversionPattern<LLVM::MulOp>::OpConversionPattern;
+  LogicalResult matchAndRewrite(LLVM::MulOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const final {
+    rewriter.replaceOpWithNewOp<emitc::MulOp>(
+        op, typeConverter->convertType(op.getResult().getType()),
+        adaptor.getLhs(), adaptor.getRhs());
+    return success();
+  }
+};
+struct LLVMAndPattern : public OpConversionPattern<LLVM::AndOp> {
+  using OpConversionPattern<LLVM::AndOp>::OpConversionPattern;
+  LogicalResult matchAndRewrite(LLVM::AndOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const final {
+    llvm::SmallVector<Type> resTypes = {typeConverter->convertType(op.getResult().getType())};
+    rewriter.replaceOpWithNewOp<emitc::CallOp>(op, resTypes,
+        rewriter.getStringAttr("__ep2_bitand"), mlir::ArrayAttr{}, mlir::ArrayAttr{},
+        adaptor.getOperands());
+    return success();
+  }
+};
+struct LLVMOrPattern : public OpConversionPattern<LLVM::OrOp> {
+  using OpConversionPattern<LLVM::OrOp>::OpConversionPattern;
+  LogicalResult matchAndRewrite(LLVM::OrOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const final {
+    llvm::SmallVector<Type> resTypes = {typeConverter->convertType(op.getResult().getType())};
+    rewriter.replaceOpWithNewOp<emitc::CallOp>(op, resTypes,
+        rewriter.getStringAttr("__ep2_bitor"), mlir::ArrayAttr{}, mlir::ArrayAttr{},
+        adaptor.getOperands());
+    return success();
+  }
+};
+struct LLVMXorPattern : public OpConversionPattern<LLVM::XOrOp> {
+  using OpConversionPattern<LLVM::XOrOp>::OpConversionPattern;
+  LogicalResult matchAndRewrite(LLVM::XOrOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const final {
+    llvm::SmallVector<Type> resTypes = {typeConverter->convertType(op.getResult().getType())};
+    rewriter.replaceOpWithNewOp<emitc::CallOp>(op, resTypes,
+        rewriter.getStringAttr("__ep2_bitxor"), mlir::ArrayAttr{}, mlir::ArrayAttr{},
+        adaptor.getOperands());
+    return success();
+  }
+};
+struct LLVMShlPattern : public OpConversionPattern<LLVM::ShlOp> {
+  using OpConversionPattern<LLVM::ShlOp>::OpConversionPattern;
+  LogicalResult matchAndRewrite(LLVM::ShlOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const final {
+    llvm::SmallVector<Type> resTypes = {typeConverter->convertType(op.getResult().getType())};
+    rewriter.replaceOpWithNewOp<emitc::CallOp>(op, resTypes,
+        rewriter.getStringAttr("__ep2_shl"), mlir::ArrayAttr{}, mlir::ArrayAttr{},
+        adaptor.getOperands());
     return success();
   }
 };
@@ -1052,11 +1112,13 @@ void LowerEmitcPass::runOnOperation() {
   target.addLegalDialect<ep2::EP2Dialect, func::FuncDialect, LLVM::LLVMDialect, emitc::EmitCDialect,
                          BuiltinDialect>();
 
-  target.addIllegalOp<ep2::ConstantOp, ep2::StoreOp, ep2::ContextRefOp, ep2::TerminateOp, 
+  target.addIllegalOp<ep2::ConstantOp, ep2::StoreOp, ep2::ContextRefOp, ep2::TerminateOp,
     ep2::CallOp, ep2::FuncOp, ep2::ReturnOp, ep2::StructUpdateOp, ep2::NopOp, ep2::InitOp,
     ep2::StructAccessOp, ep2::ExtractOp, ep2::EmitOp, ep2::BitCastOp, ep2::SubOp, ep2::AddOp,
     ep2::CmpOp, ep2::MulOp, arith::SelectOp, ep2::LookupOp, ep2::UpdateOp, ep2::LoadOp,
     ep2::ExtractOffsetOp, ep2::EmitOffsetOp, ep2::GlobalImportOp>();
+  // Remaining LLVM arithmetic ops not converted by ep2-lift-llvm
+  target.addIllegalOp<LLVM::MulOp, LLVM::AndOp, LLVM::OrOp, LLVM::XOrOp, LLVM::ShlOp>();
   target.addDynamicallyLegalDialect<cf::ControlFlowDialect>([&](mlir::Operation* op){
     return typeConverter.isLegal(op);
   });
@@ -1066,7 +1128,8 @@ void LowerEmitcPass::runOnOperation() {
   patterns.add<CallPattern, ReturnPattern, ControllerPattern, StructUpdatePattern, EmitPattern,
                ContextRefPattern, StructAccessPattern, TerminatePattern, NopPattern, BitCastPattern,
                SubPattern, AddPattern, MulPattern, CmpPattern, SelectPattern, EmitOffsetPattern,
-               TableUpdatePattern, BranchPattern, CondBranchPattern, GlobalImportPattern>(typeConverter, &getContext());
+               TableUpdatePattern, BranchPattern, CondBranchPattern, GlobalImportPattern,
+               LLVMMulPattern, LLVMAndPattern, LLVMOrPattern, LLVMXorPattern, LLVMShlPattern>(typeConverter, &getContext());
   patterns.add<ExtractPattern>(typeConverter, &getContext(),
                                 allocAnalysis);
   patterns.add<ExtractOffsetPattern>(typeConverter, &getContext(),

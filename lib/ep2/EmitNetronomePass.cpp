@@ -130,6 +130,11 @@ void EmitNetronomePass::runOnOperation() {
     fout_prog_hdr << "#include \"nfplib.h\"\n";
     fout_prog_hdr << "#include <nfp/mem_ring.h>\n";
     fout_prog_hdr << "#include \"extern/extern_net_meta.h\"\n\n";
+    // Bitwise helpers used by ep2-lower-emitc for LLVM bitwise ops
+    fout_prog_hdr << "#define __ep2_bitand(a,b) ((a)&(b))\n";
+    fout_prog_hdr << "#define __ep2_bitor(a,b)  ((a)|(b))\n";
+    fout_prog_hdr << "#define __ep2_bitxor(a,b) ((a)^(b))\n";
+    fout_prog_hdr << "#define __ep2_shl(a,b)    ((a)<<(b))\n\n";
 
     for (unsigned width : info.typeBitWidths) {
       if (width == 8 || width == 16 || width == 32 || width == 64) {

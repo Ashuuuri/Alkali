@@ -16,6 +16,8 @@
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 
 // Analysis pass for converting the pointer value to LLVM type
@@ -23,6 +25,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "mlir/Transforms/Passes.h"
+#include "mlir/IR/Dominance.h"
 #include "ep2/passes/LiftUtils.h"
 #include "ep2/Utilities.h"
 
@@ -61,8 +64,14 @@ struct StackSlotValue : public AbstractDenseLattice {
 
   Value lookup(Value value) const {
     llvm::DenseMap<Value, Value>::const_iterator it;
+    llvm::SmallPtrSet<void *, 16> visited;
     while ((it = updateTable.find(value)) != updateTable.end()) {
       if (it->first == it->second)
+        break;
+      // Cycle detection: if we've seen this value before, break to avoid
+      // infinite loop. Cycles should not occur given correct update() usage,
+      // but this guard prevents hangs in unexpected edge cases.
+      if (!visited.insert(value.getAsOpaquePointer()).second)
         break;
       value = it->second;
     }
@@ -101,19 +110,26 @@ struct StackSlotValue : public AbstractDenseLattice {
     updateTable.clear();
     return ChangeResult::Change;
   }
-  void init(Value value, Value source) {
+  ChangeResult init(Value value, Value source) {
     auto [it, inserted] = updateTable.try_emplace(value, source);
-    assert(inserted && "Value already initialized");
+    return inserted ? ChangeResult::Change : ChangeResult::NoChange;
   }
-  void init(Value value) { init(value, value); }
+  ChangeResult init(Value value) { return init(value, value); }
 
   ChangeResult update(Value value, Value newValue) {
+    // Resolve newValue to its canonical representative first to prevent cycles.
+    // If newValue already has a chain, we want to point to the terminal of that
+    // chain, not to newValue itself (which might be mid-chain).
+    newValue = lookup(newValue);
+
     llvm::DenseMap<Value, Value>::iterator it;
     auto changed = ChangeResult::NoChange;
     while ((it = updateTable.find(value)) != updateTable.end()) {
       if (it->first == it->second) {
-        it->second = newValue;
-        changed = ChangeResult::Change;
+        if (it->second != newValue) {
+          it->second = newValue;
+          changed = ChangeResult::Change;
+        }
         break;
       }
       value = it->second;
@@ -135,21 +151,17 @@ class StackVariableAnalysis : public DenseForwardDataFlowAnalysis<StackSlotValue
         TypeSwitch<Operation *, ChangeResult>(op)
             // Only allocate creates the stack slot
             .Case<LLVM::AllocaOp, ep2::InitOp>([&](Operation *op) {
-              after->init(op->getResult(0));
-              return ChangeResult::Change;
+              return after->init(op->getResult(0));
             })
             .Case<LLVM::StoreOp>([&](LLVM::StoreOp &op) {
-              after->update(op.getAddr(), op.getValue());
-              return ChangeResult::Change;
+              return after->update(op.getAddr(), op.getValue());
             })
             .Case<ep2::AssignOp>([&](ep2::AssignOp &op) {
               // LHS is address
-              after->update(op.getLhs(), op.getRhs());
-              return ChangeResult::Change;
+              return after->update(op.getLhs(), op.getRhs());
             })
             .Case<UnrealizedConversionCastOp, LLVM::LoadOp>([&](Operation *op) {
-              after->init(op->getResult(0), op->getOperand(0));
-              return ChangeResult::Change;
+              return after->init(op->getResult(0), op->getOperand(0));
             })
             .Default([&](Operation *op) { return ChangeResult::NoChange; });
 
@@ -406,7 +418,16 @@ class LoadRewrite : public OpRewritePattern<LLVM::LoadOp> {
 
     // TODO: use adaptor?
     auto converted = castEP2Value(rewriter, gepOp.getOperand(0), structType);
-    rewriter.replaceOpWithNewOp<ep2::StructAccessOp>(op, converted, offset.getInt());
+    auto accessOp = rewriter.create<ep2::StructAccessOp>(op.getLoc(), converted, offset.getInt());
+    Value result = accessOp.getResult();
+    // If struct field type is narrower than the LLVM load type, sign-extend to
+    // restore the original width so downstream LLVM arithmetic (e.g. xor) stays
+    // type-consistent.
+    auto origIntTy = dyn_cast<IntegerType>(op.getType());
+    auto newIntTy  = dyn_cast<IntegerType>(result.getType());
+    if (origIntTy && newIntTy && newIntTy.getWidth() < origIntTy.getWidth())
+      result = rewriter.create<LLVM::ZExtOp>(op.getLoc(), origIntTy, result);
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -440,9 +461,15 @@ struct InitRewrite : public OpRewritePattern<LLVM::AllocaOp> {
     auto elemType = dyn_cast_if_present<LLVM::LLVMStructType>(op.getElemType().value_or(nullptr));
     if (!elemType)
       return rewriter.notifyMatchFailure(op, "non-target alloca");
-    
-    auto structType = liftLLVMType(rewriter, elemType);
 
+    // "buf_tag" is the underlying struct for buf_t (buf_t = struct buf_tag *).
+    // Allocating a struct buf_tag creates a local buffer; treat it as Buffer.
+    if (elemType.getName() == "struct.buf_tag") {
+      rewriter.replaceOpWithNewOp<ep2::InitOp>(op, rewriter.getType<ep2::BufferType>());
+      return success();
+    }
+
+    auto structType = liftLLVMType(rewriter, elemType);
     rewriter.replaceOpWithNewOp<ep2::InitOp>(op, structType);
     return success();
   }
@@ -611,6 +638,70 @@ class TruncConversion : public OpConversionPattern<LLVM::TruncOp> {
   }
 };
 
+class ZExtConversion : public OpConversionPattern<LLVM::ZExtOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(LLVM::ZExtOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const final {
+    rewriter.replaceOpWithNewOp<ep2::BitCastOp>(op, op.getResult().getType(), adaptor.getArg());
+    return success();
+  }
+};
+
+// Map LLVM icmp predicate to EP2 CmpOp predicate char value.
+// EP2 uses tok_cmp_eq=-40 (stored as 40), tok_cmp_le=-41 (41), tok_cmp_ge=-42 (42),
+// '<'=60 for slt, '>'=62 for sgt.  Use 43 as NE (not in existing EP2 tok set).
+static std::optional<int> llvmICmpToEP2Pred(LLVM::ICmpPredicate pred) {
+  switch (pred) {
+    case LLVM::ICmpPredicate::eq:  return 40;   // -tok_cmp_eq
+    case LLVM::ICmpPredicate::ne:  return 43;   // NE extension
+    case LLVM::ICmpPredicate::slt:
+    case LLVM::ICmpPredicate::ult: return 60;   // '<'
+    case LLVM::ICmpPredicate::sle:
+    case LLVM::ICmpPredicate::ule: return 41;   // -tok_cmp_le
+    case LLVM::ICmpPredicate::sgt:
+    case LLVM::ICmpPredicate::ugt: return 62;   // '>'
+    case LLVM::ICmpPredicate::sge:
+    case LLVM::ICmpPredicate::uge: return 42;   // -tok_cmp_ge
+    default: return std::nullopt;
+  }
+}
+
+class ICmpConversion : public OpConversionPattern<LLVM::ICmpOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(LLVM::ICmpOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const final {
+    auto ep2Pred = llvmICmpToEP2Pred(op.getPredicate());
+    if (!ep2Pred)
+      return rewriter.notifyMatchFailure(op, "unsupported icmp predicate");
+    rewriter.replaceOpWithNewOp<ep2::CmpOp>(op, (char)*ep2Pred,
+                                             adaptor.getLhs(), adaptor.getRhs());
+    return success();
+  }
+};
+
+// Convert LLVM CF branch ops to CF dialect branch ops.
+class LLVMBrConversion : public OpConversionPattern<LLVM::BrOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(LLVM::BrOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const final {
+    rewriter.replaceOpWithNewOp<cf::BranchOp>(op, op.getDest(),
+                                               adaptor.getDestOperands());
+    return success();
+  }
+};
+
+class LLVMCondBrConversion : public OpConversionPattern<LLVM::CondBrOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(LLVM::CondBrOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const final {
+    rewriter.replaceOpWithNewOp<cf::CondBranchOp>(
+        op, adaptor.getCondition(),
+        op.getTrueDest(), adaptor.getTrueDestOperands(),
+        op.getFalseDest(), adaptor.getFalseDestOperands());
+    return success();
+  }
+};
+
 } // namespace
 
 static LogicalResult postAnalysisRewrite(Operation *op) {
@@ -623,13 +714,18 @@ static LogicalResult postAnalysisRewrite(Operation *op) {
   ConversionTarget target(*builder.getContext());
   target.addLegalDialect<ep2::EP2Dialect>();
   target.addIllegalOp<LLVM::AddressOfOp, LLVM::GlobalOp, LLVM::InsertValueOp, LLVM::ConstantOp>();
-  // arth
-  target.addIllegalOp<LLVM::AddOp, LLVM::SExtOp, LLVM::TruncOp>();
-  
+  // arith
+  target.addIllegalOp<LLVM::AddOp, LLVM::SExtOp, LLVM::TruncOp, LLVM::ZExtOp>();
+  // comparisons and control flow
+  target.addIllegalOp<LLVM::ICmpOp, LLVM::BrOp, LLVM::CondBrOp>();
+  target.addLegalDialect<cf::ControlFlowDialect>();
+
   mlir::RewritePatternSet patterns(builder.getContext());
   patterns.add<ConstantConversion, AddressOfConversion, InsertValueConversion,
                GloablOpConversion>(typeConverter, builder.getContext());
-  patterns.add<AddConversion, SubConversion, SExtConversion, TruncConversion>(typeConverter, builder.getContext());
+  patterns.add<AddConversion, SubConversion, SExtConversion, TruncConversion,
+               ZExtConversion, ICmpConversion,
+               LLVMBrConversion, LLVMCondBrConversion>(typeConverter, builder.getContext());
 
   FrozenRewritePatternSet patternSet(std::move(patterns));
 
@@ -662,8 +758,15 @@ void LiftLLVMPasses::runOnOperation() {
   llvm::json::Path path(root);
   llvm::json::fromJSON(json.get(), tableDesc, path);
 
-  // Set all functions to public
+  // Set all functions to public; remove main and external declarations.
+  // Also collect which functions have at least one call site.
   {
+    llvm::DenseSet<StringRef> calledFunctions;
+    getOperation()->walk([&](LLVM::CallOp call) {
+      if (auto callee = call.getCallee())
+        calledFunctions.insert(*callee);
+    });
+
     OperatorRemoveGuard toRemove;
     getOperation()->walk([&](LLVM::LLVMFuncOp func) {
       // make sure everything is public and cannot be ignored
@@ -675,12 +778,30 @@ void LiftLLVMPasses::runOnOperation() {
       // clear external lib functions
       if (func.isExternal())
         toRemove.add(func);
+      // remove internal/private helper functions with no remaining call sites
+      // (already inlined by the MLIR --inline pass)
+      auto lnk = func.getLinkage();
+      if (!func.isDeclaration() &&
+          (lnk == LLVM::Linkage::Internal || lnk == LLVM::Linkage::Private) &&
+          calledFunctions.find(func.getName()) == calledFunctions.end())
+        toRemove.add(func);
+    });
+  }
+
+  // Remove lifetime intrinsics before preAnalysisRewrite: InitRewrite converts
+  // alloca pointers to struct values, which breaks the pointer-typed operand of
+  // lifetime.start/end.
+  {
+    OperatorRemoveGuard toRemove;
+    getOperation()->walk([&](Operation *op) {
+      if (isa<LLVM::LifetimeStartOp, LLVM::LifetimeEndOp>(op))
+        toRemove.add(op);
     });
   }
 
   if (failed(preAnalysisRewrite(getOperation())))
     return signalPassFailure();
-  
+
   if (failed(postAnalysisRewrite(getOperation())))
     return signalPassFailure();
 
@@ -738,6 +859,10 @@ void LiftLLVMPasses::runOnOperation() {
   // dce
   OperatorRemoveGuard::until([&](OperatorRemoveGuard &toRemove) {
     getOperation()->walk([&](Operation *op) {
+      // Never remove terminators — they're needed for block structure even if
+      // they have no SSA result uses.
+      if (op->hasTrait<OpTrait::IsTerminator>())
+        return;
       if (op->use_empty() && (isPure(op) || isa<LLVM::AllocaOp>(op)))
         toRemove.add(op);
     });
