@@ -37,6 +37,11 @@ WORKLOAD_TARGET = {
     "8mpps":   100,
     "20mpps":   40,
     "40mpps":   20,
+    "20mpps_64B":   40,
+    "20mpps_256B":  40,
+    "20mpps_1500B": 40,
+    "20mpps_hot50": 40,
+    "20mpps_hot90": 40,
 }
 
 CSV_FIELDS = ["benchmark", "workload", "run", "latency", "stages", "cu_total", "distribution"]

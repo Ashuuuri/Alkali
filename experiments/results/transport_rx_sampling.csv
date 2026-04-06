@@ -1,0 +1,7 @@
+benchmark,workload,run,latency,stages,cu_total,distribution
+transport_rx,20mpps_64B,1,34,1,6,6
+transport_rx,20mpps_64B,2,34,1,6,6
+transport_rx,20mpps_64B,3,34,1,6,6
+transport_rx,20mpps_1500B,1,34,1,6,6
+transport_rx,20mpps_1500B,2,34,1,6,6
+transport_rx,20mpps_1500B,3,34,1,6,6

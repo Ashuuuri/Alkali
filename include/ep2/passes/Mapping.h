@@ -172,20 +172,31 @@ class NetronomePerformanceModel : public PerformanceModel {
 
   int getLatency(ep2::FuncOp funcOp) override {
     int latency = 0;
+    double avgPkt = workload_.avgPktBytes;  // default 64
+    double hot    = workload_.hotKeyRatio;  // default 0.0
+
     funcOp.walk([&](Operation *op) {
       llvm::TypeSwitch<Operation *>(op)
-          .Case<ep2::LookupOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("lookup"); })
-          .Case<ep2::UpdateOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("update"); })
-          .Case<ep2::AddOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("add"); })
-          .Case<ep2::SubOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("sub"); })
-          .Case<ep2::EmitOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("emit"); })
-          .Case<ep2::ExtractOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("extract"); });
+          .Case<ep2::LookupOp>([&](Operation *) {
+            // Hot keys hit fast memory (~20c), cold keys hit slow memory (~100c)
+            latency += static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
+          })
+          .Case<ep2::UpdateOp>([&](Operation *) {
+            latency += static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
+          })
+          .Case<ep2::ExtractOp>([&](Operation *) {
+            // Larger packets take more cycles to extract (1B per 8 cycles overhead)
+            latency += static_cast<int>(spec_.getInstrLatency("extract") + avgPkt / 8.0);
+          })
+          .Case<ep2::EmitOp>([&](Operation *) {
+            latency += static_cast<int>(spec_.getInstrLatency("emit") + avgPkt / 8.0);
+          })
+          .Case<ep2::AddOp>([&](Operation *) {
+            latency += spec_.getInstrLatency("add");
+          })
+          .Case<ep2::SubOp>([&](Operation *) {
+            latency += spec_.getInstrLatency("sub");
+          });
     });
     return latency;
   }

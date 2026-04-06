@@ -1,5 +1,10 @@
 benchmark,workload,run,latency,stages,cu_total,distribution
-nfchain,default,1,77,4,13,3+3+3+4
-nfchain,default,2,81,4,13,4+3+3+3
-nfchain,20mpps,1,37,4,29,9+8+6+6
-nfchain,20mpps,2,39,4,28,6+8+6+8
+nfchain,20mpps_64B,1,38,4,29,9+8+6+6
+nfchain,20mpps_64B,2,37,4,29,9+8+6+6
+nfchain,20mpps_64B,3,38,4,28,6+8+6+8
+nfchain,20mpps_hot50,1,38,4,20,7+4+5+4
+nfchain,20mpps_hot50,2,38,4,20,7+4+5+4
+nfchain,20mpps_hot50,3,38,4,19,4+4+6+5
+nfchain,20mpps_hot90,1,35,4,11,4+3+2+2
+nfchain,20mpps_hot90,2,38,4,10,3+3+2+2
+nfchain,20mpps_hot90,3,38,4,11,3+3+2+3
