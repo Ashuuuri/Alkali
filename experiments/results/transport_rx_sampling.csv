@@ -1,7 +1,10 @@
 benchmark,workload,run,latency,stages,cu_total,distribution
-transport_rx,20mpps_64B,1,34,1,6,6
-transport_rx,20mpps_64B,2,34,1,6,6
-transport_rx,20mpps_64B,3,34,1,6,6
-transport_rx,20mpps_4flows,1,52,1,4,4
-transport_rx,20mpps_4flows,2,52,1,4,4
-transport_rx,20mpps_4flows,3,52,1,4,4
+transport_rx,default,1,69,1,3,3
+transport_rx,default,2,69,1,3,3
+transport_rx,default,3,69,1,3,3
+transport_rx,20mpps,1,34,1,6,6
+transport_rx,20mpps,2,34,1,6,6
+transport_rx,20mpps,3,34,1,6,6
+transport_rx,40mpps,1,18,1,11,11
+transport_rx,40mpps,2,18,1,11,11
+transport_rx,40mpps,3,18,1,11,11
