@@ -1,0 +1,5 @@
+benchmark,workload,run,latency,stages,cu_total,distribution
+nfchain,default,1,77,4,13,3+3+3+4
+nfchain,default,2,81,4,13,4+3+3+3
+nfchain,20mpps,1,37,4,29,9+8+6+6
+nfchain,20mpps,2,39,4,28,6+8+6+8
