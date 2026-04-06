@@ -47,8 +47,14 @@ if [ -f "$NETRONOME_SPEC" ]; then
   SPEC_OPT=" spec=$NETRONOME_SPEC"
 fi
 
+WORKLOAD_SPEC="${WORKLOAD_SPEC:-}"
+WORKLOAD_OPT=""
+if [ -n "$WORKLOAD_SPEC" ] && [ -f "$WORKLOAD_SPEC" ]; then
+  WORKLOAD_OPT=" workload=$WORKLOAD_SPEC"
+fi
+
 if [ "$disable_cut" != "disable_cut" ]; then
-  ./build/bin/ep2c-opt -ep2-pipeline-handler="mode=loop target=netronome${SPEC_OPT}" \
+  ./build/bin/ep2c-opt -ep2-pipeline-handler="mode=loop target=netronome${SPEC_OPT}${WORKLOAD_OPT}" \
     "netronome_out/commonopt.mlir" -o "netronome_out/cut.mlir"
 else
   echo "Warning: cut optimization is disabled, skipping cut optimization"

@@ -1272,8 +1272,8 @@ void PipelineHandlerPass::runOnOperation() {
     if (target.getValue() == "fpga") {
       model = std::make_unique<FPGAPerformanceModel>();
     } else if (target.getValue() == "netronome") {
-      if (!specPath.getValue().empty())
-        model = std::make_unique<NetronomePerformanceModel>(specPath.getValue());
+      if (!specPath.getValue().empty() || !workloadPath.getValue().empty())
+        model = std::make_unique<NetronomePerformanceModel>(specPath.getValue(), workloadPath.getValue());
       else
         model = std::make_unique<NetronomePerformanceModel>();
     } else {
