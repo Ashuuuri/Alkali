@@ -47,7 +47,25 @@ WORKLOAD_TARGET = {
     "20mpps_64flows": 40,
 }
 
-CSV_FIELDS = ["benchmark", "workload", "run", "latency", "stages", "cu_total", "distribution"]
+ME_FREQ = 800_000_000  # 800 MHz
+
+WORKLOAD_TARGET_PPS = {
+    "default":        0,
+    "8mpps":          8e6,
+    "20mpps":        20e6,
+    "40mpps":        40e6,
+    "20mpps_64B":    20e6,
+    "20mpps_256B":   20e6,
+    "20mpps_1500B":  20e6,
+    "20mpps_hot50":  20e6,
+    "20mpps_hot90":  20e6,
+    "20mpps_4flows": 20e6,
+    "20mpps_16flows":20e6,
+    "20mpps_64flows":20e6,
+}
+
+CSV_FIELDS = ["benchmark", "workload", "run", "latency", "stages", "cu_total",
+              "distribution", "est_pps", "meets_target"]
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -124,6 +142,12 @@ def run_one(bench: str, workload: str, run_idx: int) -> dict:
         # Note: non-zero exit is tolerated — the emit step may fail after
         # mapping completes. We still attempt to parse the mapping result.
         lat, stages, cu_total, dist = parse_final_mapping(output)
+        est_pps    = ME_FREQ / lat if lat > 0 else 0
+        target_pps = WORKLOAD_TARGET_PPS.get(workload, 0)
+        if target_pps > 0:
+            meets = "yes" if est_pps >= target_pps else "no"
+        else:
+            meets = "-"
         return {
             "benchmark":    bench,
             "workload":     workload,
@@ -132,6 +156,8 @@ def run_one(bench: str, workload: str, run_idx: int) -> dict:
             "stages":       stages,
             "cu_total":     cu_total,
             "distribution": dist,
+            "est_pps":      f"{est_pps/1e6:.1f}M",
+            "meets_target": meets,
         }
     except ValueError as exc:
         return _error_row(bench, workload, run_idx, str(exc))
@@ -149,6 +175,8 @@ def _error_row(bench, workload, run_idx, reason):
         "stages":       "ERROR",
         "cu_total":     "ERROR",
         "distribution": reason,
+        "est_pps":      "ERROR",
+        "meets_target": "ERROR",
     }
 
 
@@ -183,12 +211,13 @@ def write_markdown(rows: list[dict], bench: str, workloads: list[str]) -> str:
         target = WORKLOAD_TARGET.get(wload, "?")
         wrows  = [r for r in rows if r["workload"] == wload]
         lines.append(f"## {wload}  (target={target})\n")
-        lines.append("| Run | Latency | Stages | CU total | Distribution |")
-        lines.append("|-----|---------|--------|----------|--------------|")
+        lines.append("| Run | Latency | Stages | CU total | Distribution | Est. pps | Meets? |")
+        lines.append("|-----|---------|--------|----------|--------------|----------|--------|")
         for r in wrows:
             lines.append(
                 f"| {r['run']} | {r['latency']} | {r['stages']} "
-                f"| {r['cu_total']} | {r['distribution']} |"
+                f"| {r['cu_total']} | {r['distribution']} "
+                f"| {r['est_pps']} | {r['meets_target']} |"
             )
         lats  = [r["latency"]  for r in wrows]
         cus   = [r["cu_total"] for r in wrows]
@@ -215,10 +244,19 @@ def write_markdown(rows: list[dict], bench: str, workloads: list[str]) -> str:
     return path
 
 
+def _est_pps_str(lat_med):
+    """Convert median latency (number or 'N/A') to est pps string."""
+    if not isinstance(lat_med, (int, float)):
+        return "N/A"
+    pps = ME_FREQ / lat_med if lat_med > 0 else 0
+    return f"{pps/1e6:.1f}M"
+
+
 def print_summary(all_rows: list[dict], benches: list[str], workloads: list[str]):
     """Print cross-benchmark summary table to stdout."""
-    col_w = [12, 8, 7, 17, 13, 8]
-    header = ["Benchmark", "Workload", "target", "Latency (median)", "CU (median)", "Stages"]
+    col_w = [12, 16, 7, 14, 11, 7, 10, 7]
+    header = ["Benchmark", "Workload", "target", "Latency (med)", "CU (med)",
+              "Stages", "Est. pps", "Meets?"]
     sep    = "  ".join("-" * w for w in col_w)
     row_fmt = "  ".join(f"{{:<{w}}}" for w in col_w)
 
@@ -236,8 +274,14 @@ def print_summary(all_rows: list[dict], benches: list[str], workloads: list[str]
             _, _, lmed = _stats([r["latency"]  for r in wrows])
             _, _, cmed = _stats([r["cu_total"] for r in wrows])
             _, _, smed = _stats([r["stages"]   for r in wrows])
+            est        = _est_pps_str(lmed)
+            tpps       = WORKLOAD_TARGET_PPS.get(wload, 0)
+            if tpps > 0 and isinstance(lmed, (int, float)) and lmed > 0:
+                meets = "yes" if ME_FREQ / lmed >= tpps else "no"
+            else:
+                meets = "-"
             print(row_fmt.format(bench, wload, str(target),
-                                 str(lmed), str(cmed), str(smed)))
+                                 str(lmed), str(cmed), str(smed), est, meets))
     print()
 
 
@@ -281,9 +325,11 @@ def main():
                 row = run_one(bench, wload, i)
                 bench_rows.append(row)
                 all_rows.append(row)
-                lat = row["latency"]
-                cu  = row["cu_total"]
-                print(f"  → latency={lat}  CU={cu}")
+                lat  = row["latency"]
+                cu   = row["cu_total"]
+                epps = row["est_pps"]
+                mt   = row["meets_target"]
+                print(f"  → latency={lat}  CU={cu}  est_pps={epps}  meets={mt}")
 
         csv_path = write_csv(bench_rows, bench)
         md_path  = write_markdown(bench_rows, bench, workloads)
