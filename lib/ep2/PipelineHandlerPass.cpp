@@ -37,6 +37,7 @@
 
 #include "ep2/passes/LiftUtils.h"
 #include "ep2/passes/Mapping.h"
+#include "ep2/passes/WorkloadSpec.h"
 
 #define BOOST_NO_EXCEPTIONS
 #include <boost/throw_exception.hpp>
@@ -813,7 +814,13 @@ bool pipelineHandler(ep2::FuncOp funcOp, PipelinePolicy* policy, PipelineResult*
 
 struct NetronomeKCutPolicy : public PipelinePolicy {
   int numCuts;
-  NetronomeKCutPolicy(int k, double tolerance = 0.1) : PipelinePolicy(1.0f / k, tolerance), numCuts(k) {}
+  double avgPktBytes;
+  llvm::DenseMap<mlir::Operation*, int> tableMemMap;
+  NetronomeKCutPolicy(int k, double tolerance = 0.1,
+                      double avgPkt = 64.0,
+                      llvm::DenseMap<mlir::Operation*, int> map = {})
+      : PipelinePolicy(1.0f / k, tolerance), numCuts(k),
+        avgPktBytes(avgPkt), tableMemMap(std::move(map)) {}
 
 
   int valueWeight(mlir::Value v) override {
@@ -821,10 +828,22 @@ struct NetronomeKCutPolicy : public PipelinePolicy {
   }
   int operationWeight(mlir::Operation* op) override {
     return llvm::TypeSwitch<Operation *, int>(op)
-        // non weight ops
+        .Case<ep2::LookupOp>([&](ep2::LookupOp lookupOp) {
+          int memCost = 0;
+          if (auto importOp = lookupOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+            memCost = tableMemMap.lookup(importOp);
+          return 100 + memCost;
+        })
+        .Case<ep2::UpdateOp>([&](ep2::UpdateOp updateOp) {
+          int memCost = 0;
+          if (auto importOp = updateOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+            memCost = tableMemMap.lookup(importOp);
+          return 100 + memCost;
+        })
+        .Case<ep2::ExtractOp, ep2::EmitOp>([&](Operation *) {
+          return static_cast<int>(1.0 + avgPktBytes / 8.0);
+        })
         .Case([&](ep2::GlobalImportOp) { return 100; })
-        // .Case<ep2::StructAccessOp, ep2::ConstantOp,
-        //       ep2::BitCastOp>([&](Operation *) { return 1; })
         .Default([&](Operation *) { return 1; });
   }
 
@@ -863,8 +882,8 @@ struct NetronomeKCutPolicy : public PipelinePolicy {
     double localTol = tolerance;
     localTol = tolerance / (1 - 1.0 / (numCuts));
 
-    auto source = std::make_shared<NetronomeKCutPolicy>(newCuts, localTol);
-    auto sink = std::make_shared<NetronomeKCutPolicy>(newCuts, localTol);
+    auto source = std::make_shared<NetronomeKCutPolicy>(newCuts, localTol, avgPktBytes, tableMemMap);
+    auto sink = std::make_shared<NetronomeKCutPolicy>(newCuts, localTol, avgPktBytes, tableMemMap);
 
     bool noCutSource = result.sourceWeight < 1.0f / numCuts + localTol;
     source->done = newCuts == 1 || noCutSource;
@@ -1031,7 +1050,9 @@ bool isTableClean(ep2::FuncOp funcOp) {
   return keyUnique && key != nullptr;
 }
 
-std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc) {
+std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc,
+                                                    llvm::DenseMap<mlir::Operation*, int> tableMemMap,
+                                                    double avgPktBytes) {
   // build searching sequence
   SmallVector<std::pair<float, float>> cutParams;
   for (int j = 5; j >= 0; j--) // first search tolerance
@@ -1040,13 +1061,13 @@ std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc) {
   // finally we try weak cuts
   for (int i = 1; i <= 5; i++)
     cutParams.push_back({i / 10.0f, i / 10.0f});
-  
+
   bool valid = false;
 
   for (auto [sourceWeight, tol] : cutParams) {
     SearchDirection sd;
     sd[targetFunc] =
-      std::make_shared<NetronomeKCutPolicy>(2, tol);
+      std::make_shared<NetronomeKCutPolicy>(2, tol, avgPktBytes, tableMemMap);
     sd[targetFunc]->sourceWeight = sourceWeight;
 
     auto cuts = stepSearch(sd);
@@ -1267,7 +1288,7 @@ void PipelineHandlerPass::runOnOperation() {
     auto targetFunc = toOpt[0];
       
     // try to optimize the function
-    BottleneckExplorer explorer;
+    WorkloadSpec wspec = WorkloadSpec::load(workloadPath.getValue());
     std::unique_ptr<PerformanceModel> model;
     if (target.getValue() == "fpga") {
       model = std::make_unique<FPGAPerformanceModel>();
@@ -1281,6 +1302,7 @@ void PipelineHandlerPass::runOnOperation() {
       signalPassFailure();
       return;
     }
+    BottleneckExplorer explorer(wspec.avgPktBytes, model.get());
     PipelineMapper mapper(std::move(model));
 
     optimizationLoop(targetFunc, mapper, explorer);
