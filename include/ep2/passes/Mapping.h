@@ -259,34 +259,58 @@ class NetronomePerformanceModel : public PerformanceModel {
   // via getCommunicationCost.
   int getLatency(ep2::FuncOp funcOp) override {
     int latency = 0;
-    auto tableMemMap = buildTableMemMap(funcOp);
+    double avgPkt = workload_.avgPktBytes;  // default 64
+    double hot    = workload_.hotKeyRatio;  // default 0.0
+
+    // When hotKeyRatio > 0, use the statistical workload model for lookup/update:
+    //   hot fraction hits fast LMEM (~20c), cold fraction hits slow CLS (~100c).
+    // When hotKeyRatio == 0, fall back to size-based structural LMEM/CLS placement.
+    auto tableMemMap = (hot == 0.0) ? buildTableMemMap(funcOp)
+                                    : llvm::DenseMap<mlir::Operation *, int>{};
 
     funcOp.walk([&](Operation *op) {
       llvm::TypeSwitch<Operation *>(op)
           .Case<ep2::LookupOp>([&](ep2::LookupOp lookupOp) {
-            int instrCost = spec_.getInstrLatency("lookup");
-            int memCost = 0;
-            if (auto importOp =
-                    lookupOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
-              memCost = tableMemMap.lookup(importOp);
-            latency += instrCost + memCost;
+            int cost;
+            if (hot > 0.0) {
+              // Workload-aware: hot keys hit LMEM (~20c), cold keys hit CLS (~100c)
+              cost = static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
+            } else {
+              int instrCost = spec_.getInstrLatency("lookup");
+              int memCost = 0;
+              if (auto importOp =
+                      lookupOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+                memCost = tableMemMap.lookup(importOp);
+              cost = instrCost + memCost;
+            }
+            latency += cost;
           })
           .Case<ep2::UpdateOp>([&](ep2::UpdateOp updateOp) {
-            int instrCost = spec_.getInstrLatency("update");
-            int memCost = 0;
-            if (auto importOp =
-                    updateOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
-              memCost = tableMemMap.lookup(importOp);
-            latency += instrCost + memCost;
+            int cost;
+            if (hot > 0.0) {
+              cost = static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
+            } else {
+              int instrCost = spec_.getInstrLatency("update");
+              int memCost = 0;
+              if (auto importOp =
+                      updateOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+                memCost = tableMemMap.lookup(importOp);
+              cost = instrCost + memCost;
+            }
+            latency += cost;
           })
-          .Case<ep2::AddOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("add"); })
-          .Case<ep2::SubOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("sub"); })
-          .Case<ep2::EmitOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("emit"); })
           .Case<ep2::ExtractOp>([&](Operation *) {
-            latency += spec_.getInstrLatency("extract");
+            // Larger packets require more cycles to move (1c per 8B overhead)
+            latency += static_cast<int>(spec_.getInstrLatency("extract") + avgPkt / 8.0);
+          })
+          .Case<ep2::EmitOp>([&](Operation *) {
+            latency += static_cast<int>(spec_.getInstrLatency("emit") + avgPkt / 8.0);
+          })
+          .Case<ep2::AddOp>([&](Operation *) {
+            latency += spec_.getInstrLatency("add");
+          })
+          .Case<ep2::SubOp>([&](Operation *) {
+            latency += spec_.getInstrLatency("sub");
           });
     });
     return latency;
