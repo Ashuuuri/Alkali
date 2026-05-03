@@ -1,4 +1,5 @@
 #include "ep2/passes/Mapping.h"
+#include "ep2/passes/WorkloadSpec.h"
 
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -6,6 +7,44 @@
 
 namespace mlir {
 namespace ep2 {
+
+// ---------------------------------------------------------------------------
+// WorkloadSpec implementation
+// ---------------------------------------------------------------------------
+
+WorkloadSpec WorkloadSpec::none() { return WorkloadSpec{}; }
+
+WorkloadSpec WorkloadSpec::load(llvm::StringRef path) {
+  if (path.empty()) return none();
+
+  auto bufOrErr = llvm::MemoryBuffer::getFile(path);
+  if (!bufOrErr) {
+    llvm::errs() << "[WorkloadSpec] Cannot open '" << path << "', using defaults.\n";
+    return none();
+  }
+
+  auto jsonOrErr = llvm::json::parse((*bufOrErr)->getBuffer());
+  if (!jsonOrErr) {
+    llvm::errs() << "[WorkloadSpec] JSON parse error, using defaults.\n";
+    llvm::consumeError(jsonOrErr.takeError());
+    return none();
+  }
+
+  const llvm::json::Object *root = jsonOrErr->getAsObject();
+  if (!root) return none();
+
+  WorkloadSpec w;
+  if (auto v = root->getNumber("pps"))           w.pps = *v;
+  if (auto v = root->getNumber("avg_pkt_bytes")) w.avgPktBytes = *v;
+  if (auto v = root->getInteger("active_flows")) w.activeFlows = (int)*v;
+  if (auto v = root->getNumber("hot_key_ratio")) w.hotKeyRatio = *v;
+
+  llvm::errs() << "[WorkloadSpec] Loaded: pps=" << w.pps
+               << " avgPkt=" << w.avgPktBytes << "B"
+               << " flows=" << w.activeFlows
+               << " hotKey=" << w.hotKeyRatio << "\n";
+  return w;
+}
 
 // ---------------------------------------------------------------------------
 // NetronomeSpec implementation

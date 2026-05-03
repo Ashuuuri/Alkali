@@ -40,8 +40,19 @@ EXTRACT_PY=./scripts/extract_struct_def.py
 cc -E $C_INPUT_FILE -o $C_PREPROCESS
 python3 $EXTRACT_PY $C_INPUT_FILE -o cinput.struct.json
 $CLANG_BIN_DIR/clang -S -emit-llvm $C_PREPROCESS -o $C_LLVM_FILE
+
+# Only strip noinline/optnone and run --inline when the LLVM IR contains
+# internal/private function definitions (i.e. static inline helpers that
+# clang -O0 did not inline). Without this guard, stripping optnone causes
+# downstream passes to over-optimize the IR, breaking pipeline cut points.
+INLINE_OPT=""
+if grep -q '^define internal\|^define private' "$C_LLVM_FILE"; then
+  sed -i 's/ noinline//; s/ optnone//' "$C_LLVM_FILE"
+  INLINE_OPT="--inline"
+fi
+
 $CLANG_BIN_DIR/mlir-translate  --import-llvm $C_LLVM_FILE -o $C_MLIR_FILE
-$BIN_DIR/ep2c-opt $C_MLIR_FILE --convert-scf-to-cf -cse -o cinput2.mlir
+$BIN_DIR/ep2c-opt $C_MLIR_FILE $INLINE_OPT --convert-scf-to-cf -cse -o cinput2.mlir
 
 $BIN_DIR/ep2c-opt cinput2.mlir --ep2-lift-llvm="struct-desc=cinput.struct.json" $OPTIONS -cse -cse -canonicalize --ep2-context-to-mem="transform-extern=true" -o $OUT_FILE
 

@@ -3,6 +3,7 @@
 
 #include "ep2/dialect/Dialect.h"
 #include "ep2/Utilities.h"
+#include "ep2/passes/WorkloadSpec.h"
 
 #include <map>
 #include <string>
@@ -157,12 +158,18 @@ class FPGAPerformanceModel : public PerformanceModel {
 // Netronome Model — reads from NetronomeSpec (JSON or hardcoded defaults)
 class NetronomePerformanceModel : public PerformanceModel {
   NetronomeSpec spec_;
+  WorkloadSpec workload_;
  public:
   // Default constructor: preserves original hardcoded behaviour
-  NetronomePerformanceModel() : spec_(NetronomeSpec::defaults()) {}
+  NetronomePerformanceModel()
+      : spec_(NetronomeSpec::defaults()), workload_(WorkloadSpec::none()) {}
   // Spec-file constructor: loads JSON, falls back to defaults on error
   explicit NetronomePerformanceModel(llvm::StringRef specPath)
-      : spec_(NetronomeSpec::load(specPath)) {}
+      : spec_(NetronomeSpec::load(specPath)), workload_(WorkloadSpec::none()) {}
+  // Spec + workload constructor
+  NetronomePerformanceModel(llvm::StringRef specPath, llvm::StringRef workloadPath)
+      : spec_(specPath.empty() ? NetronomeSpec::defaults() : NetronomeSpec::load(specPath)),
+        workload_(WorkloadSpec::load(workloadPath)) {}
 
   int getAccessOverhead(ep2::GlobalOp globalOp) override { return 0; }
 
@@ -312,7 +319,13 @@ class NetronomePerformanceModel : public PerformanceModel {
     return (count == 0) ? 0 : total / count;
   }
 
-  int getLatencyTarget() override { return spec_.latencyTarget; }
+  int getLatencyTarget() override {
+    if (workload_.pps > 0) {
+      int target = static_cast<int>(spec_.frequencyMhz * 1e6 / workload_.pps);
+      return std::max(1, target);
+    }
+    return spec_.latencyTarget;
+  }
 
   std::vector<std::string> getComputeUnits() override {
     return spec_.computeUnitIds;

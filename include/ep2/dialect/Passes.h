@@ -643,6 +643,10 @@ struct PipelineHandlerPass
       *this, "spec",
       llvm::cl::desc("Path to architecture spec JSON (netronome target only)"),
       llvm::cl::init("")};
+  Option<std::string> workloadPath{
+      *this, "workload",
+      llvm::cl::desc("Path to workload spec JSON"),
+      llvm::cl::init("")};
 };
 
 // FrontEnd Conversion Passes
