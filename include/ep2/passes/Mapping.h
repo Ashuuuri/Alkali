@@ -196,11 +196,16 @@ class NetronomePerformanceModel : public PerformanceModel {
 
   // Assigns each unique table in funcOp to LMEM or CLS, mirroring the
   // Netronome backend's binary placement (isLocal → __lmem, else → __cls).
-  // Small tables fill LMEM first (sorted by size ascending); remaining tables
-  // fall back to CLS latency.
+  //
+  // Placement priority (which tables enter LMEM first):
+  //   hotKeyRatio == 0: sort by size ascending (small tables fill LMEM first).
+  //   hotKeyRatio >  0: sort by access density descending (opCount / sizeBytes).
+  //     Skewed traffic concentrates accesses on fewer tables; prioritising
+  //     high-density tables maximises the latency benefit of fast LMEM.
+  //
   // Returns empty map when memoryLayers is empty (defaults() path → 0 cost).
   llvm::DenseMap<mlir::Operation *, int>
-  buildTableMemMap(ep2::FuncOp funcOp) {
+  buildTableMemMap(ep2::FuncOp funcOp, double hotKeyRatio = 0.0) {
     llvm::DenseMap<mlir::Operation *, int> result;
 
     // Find LMEM (per_me) and CLS (first per_island) layer latencies
@@ -217,39 +222,60 @@ class NetronomePerformanceModel : public PerformanceModel {
     if (lmemSize == 0 && clsLatency == 0)
       return result; // no layer info (defaults() path)
 
-    // Collect unique tables and their sizes
-    llvm::SmallVector<std::pair<ep2::GlobalImportOp, int64_t>> tables;
-    llvm::DenseSet<mlir::Operation *> seen;
+    // Collect unique tables with size and op-access count
+    struct TableEntry {
+      ep2::GlobalImportOp importOp;
+      int64_t sizeBytes;
+      int opCount; // number of lookup/update ops referencing this table
+    };
+    llvm::SmallVector<TableEntry> tables;
+    llvm::DenseMap<mlir::Operation *, int> opCountMap;
     funcOp.walk([&](Operation *op) {
       ep2::GlobalImportOp importOp = nullptr;
       if (auto lookup = dyn_cast<ep2::LookupOp>(op))
         importOp = lookup.getTable().getDefiningOp<ep2::GlobalImportOp>();
       else if (auto update = dyn_cast<ep2::UpdateOp>(op))
         importOp = update.getTable().getDefiningOp<ep2::GlobalImportOp>();
-      if (!importOp || seen.count(importOp))
+      if (!importOp)
         return;
-      seen.insert(importOp);
-      tables.push_back({importOp, getTableBytes(importOp)});
+      opCountMap[importOp]++;
     });
+    llvm::DenseSet<mlir::Operation *> seen;
+    for (auto &[op, cnt] : opCountMap) {
+      auto importOp = cast<ep2::GlobalImportOp>(op);
+      tables.push_back({importOp, getTableBytes(importOp), cnt});
+    }
 
-    // Sort by size ascending: small tables fill LMEM first
-    llvm::sort(tables,
-               [](auto &a, auto &b) { return a.second < b.second; });
+    if (hotKeyRatio > 0.0) {
+      // Skewed workload: prioritise tables with the highest access density
+      // (ops per byte) so the most-accessed data lands in fast LMEM.
+      llvm::sort(tables, [](const TableEntry &a, const TableEntry &b) {
+        // Higher density first (descending); break ties by smaller size
+        double da = (double)a.opCount / (a.sizeBytes + 1);
+        double db = (double)b.opCount / (b.sizeBytes + 1);
+        return da != db ? da > db : a.sizeBytes < b.sizeBytes;
+      });
+    } else {
+      // No workload info: sort by size ascending (small tables fill LMEM first)
+      llvm::sort(tables, [](const TableEntry &a, const TableEntry &b) {
+        return a.sizeBytes < b.sizeBytes;
+      });
+    }
 
     // Assign to LMEM if it fits, otherwise CLS
     int64_t lmemRemaining = lmemSize;
-    for (auto &[importOp, tableBytes] : tables) {
+    for (auto &entry : tables) {
       int latency = clsLatency; // default: CLS
-      if (tableBytes <= lmemRemaining) {
-        lmemRemaining -= tableBytes;
+      if (entry.sizeBytes <= lmemRemaining) {
+        lmemRemaining -= entry.sizeBytes;
         latency = lmemLatency;
-        llvm::errs() << "[TimeMem] table " << tableBytes << "B -> LMEM ("
-                     << latency << "c)\n";
+        llvm::errs() << "[TimeMem] table " << entry.sizeBytes << "B (ops="
+                     << entry.opCount << ") -> LMEM (" << latency << "c)\n";
       } else {
-        llvm::errs() << "[TimeMem] table " << tableBytes << "B -> CLS ("
-                     << latency << "c)\n";
+        llvm::errs() << "[TimeMem] table " << entry.sizeBytes << "B (ops="
+                     << entry.opCount << ") -> CLS (" << latency << "c)\n";
       }
-      result[importOp] = latency;
+      result[entry.importOp] = latency;
     }
     return result;
   }
@@ -262,42 +288,28 @@ class NetronomePerformanceModel : public PerformanceModel {
     double avgPkt = workload_.avgPktBytes;  // default 64
     double hot    = workload_.hotKeyRatio;  // default 0.0
 
-    // When hotKeyRatio > 0, use the statistical workload model for lookup/update:
-    //   hot fraction hits fast LMEM (~20c), cold fraction hits slow CLS (~100c).
-    // When hotKeyRatio == 0, fall back to size-based structural LMEM/CLS placement.
-    auto tableMemMap = (hot == 0.0) ? buildTableMemMap(funcOp)
-                                    : llvm::DenseMap<mlir::Operation *, int>{};
+    // hotKeyRatio influences placement priority inside buildTableMemMap:
+    // hot > 0 → rank by access density (ops/byte) so frequently-used tables
+    // get LMEM first; hot == 0 → rank by size (current default).
+    auto tableMemMap = buildTableMemMap(funcOp, hot);
 
     funcOp.walk([&](Operation *op) {
       llvm::TypeSwitch<Operation *>(op)
           .Case<ep2::LookupOp>([&](ep2::LookupOp lookupOp) {
-            int cost;
-            if (hot > 0.0) {
-              // Workload-aware: hot keys hit LMEM (~20c), cold keys hit CLS (~100c)
-              cost = static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
-            } else {
-              int instrCost = spec_.getInstrLatency("lookup");
-              int memCost = 0;
-              if (auto importOp =
-                      lookupOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
-                memCost = tableMemMap.lookup(importOp);
-              cost = instrCost + memCost;
-            }
-            latency += cost;
+            int instrCost = spec_.getInstrLatency("lookup");
+            int memCost = 0;
+            if (auto importOp =
+                    lookupOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+              memCost = tableMemMap.lookup(importOp);
+            latency += instrCost + memCost;
           })
           .Case<ep2::UpdateOp>([&](ep2::UpdateOp updateOp) {
-            int cost;
-            if (hot > 0.0) {
-              cost = static_cast<int>(hot * 20.0 + (1.0 - hot) * 100.0);
-            } else {
-              int instrCost = spec_.getInstrLatency("update");
-              int memCost = 0;
-              if (auto importOp =
-                      updateOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
-                memCost = tableMemMap.lookup(importOp);
-              cost = instrCost + memCost;
-            }
-            latency += cost;
+            int instrCost = spec_.getInstrLatency("update");
+            int memCost = 0;
+            if (auto importOp =
+                    updateOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+              memCost = tableMemMap.lookup(importOp);
+            latency += instrCost + memCost;
           })
           .Case<ep2::ExtractOp>([&](Operation *) {
             // Larger packets require more cycles to move (1c per 8B overhead)
