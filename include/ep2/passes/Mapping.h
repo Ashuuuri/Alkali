@@ -113,6 +113,9 @@ class PerformanceModel {
   };
 
   virtual int getAccessOverhead(ep2::GlobalOp globalOp) = 0;
+  // Returns Time_Instr + Time_Mem for the handler.
+  // Time_Comm is excluded — it is mapping-dependent and computed separately
+  // via getCommunicationCost.
   virtual int getLatency(ep2::FuncOp funcOp) = 0;
   virtual int getCommunicationCost(std::vector<std::string> &froms,
                                    std::vector<std::string> &tos) = 0;
@@ -185,8 +188,29 @@ class NetronomePerformanceModel : public PerformanceModel {
 
   int getCommunicationCost(std::vector<std::string> &froms,
                            std::vector<std::string> &tos) override {
-    // TODO: wire up island-based cost in follow-up commit
-    return 0;
+    if (froms.empty() || tos.empty())
+      return 0;
+    if (spec_.meIsland.empty())
+      return 0;
+    int total = 0, count = 0;
+    for (auto &f : froms) {
+      auto fi = spec_.meIsland.find(f);
+      if (fi == spec_.meIsland.end()) {
+        llvm::errs() << "[NetronomeSpec] island info missing for ME: " << f << "\n";
+        continue;
+      }
+      for (auto &t : tos) {
+        auto ti = spec_.meIsland.find(t);
+        if (ti == spec_.meIsland.end()) {
+          llvm::errs() << "[NetronomeSpec] island info missing for ME: " << t << "\n";
+          continue;
+        }
+        total += (fi->second == ti->second) ? spec_.intraIslandCost
+                                            : spec_.interIslandCost;
+        count++;
+      }
+    }
+    return (count == 0) ? 0 : total / count;
   }
 
   int getLatencyTarget() override { return spec_.latencyTarget; }
