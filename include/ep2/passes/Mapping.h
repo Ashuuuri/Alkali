@@ -166,22 +166,121 @@ class NetronomePerformanceModel : public PerformanceModel {
 
   int getAccessOverhead(ep2::GlobalOp globalOp) override { return 0; }
 
+  // Returns the size of one table entry in bytes from a GlobalImportOp.
+  int64_t getTableBytes(ep2::GlobalImportOp importOp) {
+    auto tableType =
+        importOp.getOutput().getType().dyn_cast<ep2::TableType>();
+    if (!tableType)
+      return 0;
+    int numEntries = tableType.getSize();
+    int entryBits = 0;
+    auto addBits = [&](mlir::Type ty) {
+      if (auto intTy = ty.dyn_cast<mlir::IntegerType>())
+        entryBits += intTy.getWidth();
+      else if (auto structTy = ty.dyn_cast<ep2::StructType>())
+        for (auto elemTy : structTy.getElementTypes())
+          if (auto iTy = elemTy.dyn_cast<mlir::IntegerType>())
+            entryBits += iTy.getWidth();
+    };
+    addBits(tableType.getKeyType());
+    addBits(tableType.getValueType());
+    return static_cast<int64_t>(numEntries) * ((entryBits + 7) / 8);
+  }
+
+  // Assigns each unique table in funcOp to LMEM or CLS, mirroring the
+  // Netronome backend's binary placement (isLocal → __lmem, else → __cls).
+  // Small tables fill LMEM first (sorted by size ascending); remaining tables
+  // fall back to CLS latency.
+  // Returns empty map when memoryLayers is empty (defaults() path → 0 cost).
+  llvm::DenseMap<mlir::Operation *, int>
+  buildTableMemMap(ep2::FuncOp funcOp) {
+    llvm::DenseMap<mlir::Operation *, int> result;
+
+    // Find LMEM (per_me) and CLS (first per_island) layer latencies
+    int lmemLatency = 0, clsLatency = 0;
+    int64_t lmemSize = 0;
+    for (auto &layer : spec_.memoryLayers) {
+      if (layer.scope == "per_me" && lmemSize == 0) {
+        lmemLatency = layer.latencyCycles;
+        lmemSize    = layer.sizeBytes;
+      } else if (layer.scope == "per_island" && clsLatency == 0) {
+        clsLatency = layer.latencyCycles;
+      }
+    }
+    if (lmemSize == 0 && clsLatency == 0)
+      return result; // no layer info (defaults() path)
+
+    // Collect unique tables and their sizes
+    llvm::SmallVector<std::pair<ep2::GlobalImportOp, int64_t>> tables;
+    llvm::DenseSet<mlir::Operation *> seen;
+    funcOp.walk([&](Operation *op) {
+      ep2::GlobalImportOp importOp = nullptr;
+      if (auto lookup = dyn_cast<ep2::LookupOp>(op))
+        importOp = lookup.getTable().getDefiningOp<ep2::GlobalImportOp>();
+      else if (auto update = dyn_cast<ep2::UpdateOp>(op))
+        importOp = update.getTable().getDefiningOp<ep2::GlobalImportOp>();
+      if (!importOp || seen.count(importOp))
+        return;
+      seen.insert(importOp);
+      tables.push_back({importOp, getTableBytes(importOp)});
+    });
+
+    // Sort by size ascending: small tables fill LMEM first
+    llvm::sort(tables,
+               [](auto &a, auto &b) { return a.second < b.second; });
+
+    // Assign to LMEM if it fits, otherwise CLS
+    int64_t lmemRemaining = lmemSize;
+    for (auto &[importOp, tableBytes] : tables) {
+      int latency = clsLatency; // default: CLS
+      if (tableBytes <= lmemRemaining) {
+        lmemRemaining -= tableBytes;
+        latency = lmemLatency;
+        llvm::errs() << "[TimeMem] table " << tableBytes << "B -> LMEM ("
+                     << latency << "c)\n";
+      } else {
+        llvm::errs() << "[TimeMem] table " << tableBytes << "B -> CLS ("
+                     << latency << "c)\n";
+      }
+      result[importOp] = latency;
+    }
+    return result;
+  }
+
+  // Returns Time_Instr + Time_Mem for the handler.
+  // Time_Comm is excluded — it is mapping-dependent and computed separately
+  // via getCommunicationCost.
   int getLatency(ep2::FuncOp funcOp) override {
     int latency = 0;
+    auto tableMemMap = buildTableMemMap(funcOp);
+
     funcOp.walk([&](Operation *op) {
       llvm::TypeSwitch<Operation *>(op)
-          .Case<ep2::LookupOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("lookup"); })
-          .Case<ep2::UpdateOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("update"); })
+          .Case<ep2::LookupOp>([&](ep2::LookupOp lookupOp) {
+            int instrCost = spec_.getInstrLatency("lookup");
+            int memCost = 0;
+            if (auto importOp =
+                    lookupOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+              memCost = tableMemMap.lookup(importOp);
+            latency += instrCost + memCost;
+          })
+          .Case<ep2::UpdateOp>([&](ep2::UpdateOp updateOp) {
+            int instrCost = spec_.getInstrLatency("update");
+            int memCost = 0;
+            if (auto importOp =
+                    updateOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
+              memCost = tableMemMap.lookup(importOp);
+            latency += instrCost + memCost;
+          })
           .Case<ep2::AddOp>(
               [&](Operation *) { latency += spec_.getInstrLatency("add"); })
           .Case<ep2::SubOp>(
               [&](Operation *) { latency += spec_.getInstrLatency("sub"); })
           .Case<ep2::EmitOp>(
               [&](Operation *) { latency += spec_.getInstrLatency("emit"); })
-          .Case<ep2::ExtractOp>(
-              [&](Operation *) { latency += spec_.getInstrLatency("extract"); });
+          .Case<ep2::ExtractOp>([&](Operation *) {
+            latency += spec_.getInstrLatency("extract");
+          });
     });
     return latency;
   }
