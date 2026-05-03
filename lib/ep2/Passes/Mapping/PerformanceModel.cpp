@@ -221,36 +221,38 @@ PerformanceModel::getMapping(llvm::SmallVector<ep2::FuncOp> &ops) {
   for (int idx = 0; idx < ops.size(); idx++)
     unitMap[idx] = {};
 
+  int flowCap = getActiveFlows();
   for (auto unit : units) {
-    bool assigned = false;
+    // Max-deficit-first: assign the next CU to whichever stage has the
+    // largest per-replica latency excess over the target.  This prevents
+    // early stages from monopolising the CU pool and starving later stages.
+    int bestIdx = -1;
+    double bestDeficit = 0;
+
     for (int idx = 0; idx < ops.size(); idx++) {
+      // constraint: non-table-clean stages can have at most 1 replica
+      if (!isTableClean(ops[idx]) && unitMap[idx].size() >= 1)
+        continue;
+
+      // constraint: no more replicas than active flows
+      if (flowCap > 0 && static_cast<int>(unitMap[idx].size()) >= flowCap)
+        continue;
+
       auto totalLatency = getLatencyForUnit(*this, idx, ops, unitMap);
+      int replicas = std::max<int>(1, unitMap[idx].size());
+      double deficit = static_cast<double>(totalLatency) / replicas - latencyTarget;
 
-      // we need to add more units
-      if (totalLatency > latencyTarget * unitMap[idx].size()) {
-
-        // constraint on the number of units
-        // TODO(zhiyuang): if its not tbale clean, we cannot replicate. check this.
-        if (!isTableClean(ops[idx]) && unitMap[idx].size() >= 1)
-          continue;
-
-        // Don't replicate beyond the number of active flows — extra replicas
-        // would receive no traffic since flows are hash-partitioned across replicas.
-        int flowCap = getActiveFlows();
-        if (flowCap > 0 && static_cast<int>(unitMap[idx].size()) >= flowCap)
-          continue;
-
-        unitMap[idx].push_back(unit);
-
-        assigned = true;
-        break;
+      if (deficit > bestDeficit) {
+        bestDeficit = deficit;
+        bestIdx = idx;
       }
     }
 
-
-    // if we do not need more unit, we can stop
-    if (!assigned)
+    // all stages satisfy the target (or none are eligible) — stop
+    if (bestIdx < 0)
       break;
+
+    unitMap[bestIdx].push_back(unit);
   }
 
   int targetIndex = 0, maxLatency = 0;
