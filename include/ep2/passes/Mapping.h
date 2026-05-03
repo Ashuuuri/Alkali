@@ -124,6 +124,7 @@ class PerformanceModel {
                                    std::vector<std::string> &tos) = 0;
   virtual int getLatencyTarget() = 0;
   virtual std::vector<std::string> getComputeUnits() = 0;
+  virtual int getActiveFlows() { return 0; }  // 0 = no limit
   virtual llvm::DenseMap<mlir::Operation*, int> getTableMemMap(ep2::FuncOp) { return {}; }
 
   // This function provides a simple, greedy mapping method for a sequence of handlers
@@ -369,6 +370,8 @@ class NetronomePerformanceModel : public PerformanceModel {
     return spec_.computeUnitIds;
   }
 
+  int getActiveFlows() override { return workload_.activeFlows; }
+
   llvm::DenseMap<mlir::Operation*, int> getTableMemMap(ep2::FuncOp funcOp) override {
     return buildTableMemMap(funcOp, workload_.hotKeyRatio);
   }
@@ -384,7 +387,7 @@ class NetronomePerformanceModel : public PerformanceModel {
 // Generic json model
 
 // Loop based searching
-static const int PIPELINE_EXTRA_SEARCH = 1;
+static const int PIPELINE_EXTRA_SEARCH = 10;
 
 // RAII guard to ensure that pipeline is mapped
 class PipelineMapper {
