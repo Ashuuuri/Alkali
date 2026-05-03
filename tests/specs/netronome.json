@@ -1,0 +1,69 @@
+{
+  "frequency_mhz": 800,
+  "latency_target": 100,
+  "compute_units": [
+    {"id": "cu0",  "island": 0}, {"id": "cu1",  "island": 0},
+    {"id": "cu2",  "island": 0}, {"id": "cu3",  "island": 0},
+    {"id": "cu4",  "island": 0}, {"id": "cu5",  "island": 0},
+    {"id": "cu6",  "island": 0}, {"id": "cu7",  "island": 0},
+    {"id": "cu8",  "island": 0}, {"id": "cu9",  "island": 0},
+    {"id": "cu10", "island": 0}, {"id": "cu11", "island": 0},
+    {"id": "cu12", "island": 1}, {"id": "cu13", "island": 1},
+    {"id": "cu14", "island": 1}, {"id": "cu15", "island": 1},
+    {"id": "cu16", "island": 1}, {"id": "cu17", "island": 1},
+    {"id": "cu18", "island": 1}, {"id": "cu19", "island": 1},
+    {"id": "cu20", "island": 1}, {"id": "cu21", "island": 1},
+    {"id": "cu22", "island": 1}, {"id": "cu23", "island": 1},
+    {"id": "cu24", "island": 2}, {"id": "cu25", "island": 2},
+    {"id": "cu26", "island": 2}, {"id": "cu27", "island": 2},
+    {"id": "cu28", "island": 2}, {"id": "cu29", "island": 2},
+    {"id": "cu30", "island": 2}, {"id": "cu31", "island": 2},
+    {"id": "cu32", "island": 2}, {"id": "cu33", "island": 2},
+    {"id": "cu34", "island": 2}, {"id": "cu35", "island": 2},
+    {"id": "cu36", "island": 3}, {"id": "cu37", "island": 3},
+    {"id": "cu38", "island": 3}, {"id": "cu39", "island": 3},
+    {"id": "cu40", "island": 3}, {"id": "cu41", "island": 3},
+    {"id": "cu42", "island": 3}, {"id": "cu43", "island": 3},
+    {"id": "cu44", "island": 3}, {"id": "cu45", "island": 3},
+    {"id": "cu46", "island": 3}, {"id": "cu47", "island": 3}
+  ],
+  "instruction_latencies": {
+    "lookup":  100,
+    "update":  100,
+    "add":       1,
+    "sub":       1,
+    "emit":      1,
+    "extract":   1,
+    "default":   1
+  },
+  "communication_cost": {
+    "intra_island": 20,
+    "inter_island": 100
+  },
+  "memory_layers": [
+    {
+      "id": "LMEM",
+      "scope": "per_me",
+      "size_bytes": 4096,
+      "latency_cycles": 4
+    },
+    {
+      "id": "CLS",
+      "scope": "per_island",
+      "size_bytes": 65536,
+      "latency_cycles": 16
+    },
+    {
+      "id": "CTM",
+      "scope": "per_island",
+      "size_bytes": 262144,
+      "latency_cycles": 40
+    },
+    {
+      "id": "EMEM",
+      "scope": "chip",
+      "size_bytes": 4294967296,
+      "latency_cycles": 300
+    }
+  ]
+}

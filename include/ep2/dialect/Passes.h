@@ -639,6 +639,10 @@ struct PipelineHandlerPass
       *this, "target",
       llvm::cl::desc("Target backend name for cut. required for loop"),
       llvm::cl::init("")};
+  Option<std::string> specPath{
+      *this, "spec",
+      llvm::cl::desc("Path to architecture spec JSON (netronome target only)"),
+      llvm::cl::init("")};
 };
 
 // FrontEnd Conversion Passes

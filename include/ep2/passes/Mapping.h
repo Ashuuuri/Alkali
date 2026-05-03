@@ -4,6 +4,10 @@
 #include "ep2/dialect/Dialect.h"
 #include "ep2/Utilities.h"
 
+#include <map>
+#include <string>
+#include <vector>
+
 namespace mlir {
 namespace ep2 {
 
@@ -59,6 +63,41 @@ void bfsSearchPolicy(Operation * moduleOp);
 void weightPolicy(FuncOp targetFunc, PolicyP weightPolicy);
 
 
+// ---------------------------------------------------------------------------
+// Netronome hardware spec (loaded from JSON or constructed from defaults)
+// ---------------------------------------------------------------------------
+
+struct MemLayerSpec {
+  std::string id;       // "LMEM" | "CLS" | "CTM" | "EMEM"
+  std::string scope;    // "per_me" | "per_island" | "chip"
+  int64_t sizeBytes;
+  int latencyCycles;
+};
+
+struct NetronomeSpec {
+  int frequencyMhz    = 800;
+  int latencyTarget   = 100;
+  int intraIslandCost = 0;   // cycles to send event within same island
+  int interIslandCost = 0;   // cycles to send event across islands
+
+  std::vector<std::string>      computeUnitIds; // ordered ME id list
+  std::map<std::string, int>    meIsland;       // me_id -> island index
+  std::map<std::string, int>    instrLatency;   // op_name -> cycles
+  std::vector<MemLayerSpec>     memoryLayers;
+
+  // Instruction latency lookup (falls back to "default" key, then 1)
+  int getInstrLatency(const std::string &opName) const;
+
+  // Memory layer queries by layer id string ("LMEM", "CLS", ...)
+  int     getMemoryLatency(const std::string &layerId) const;
+  int64_t getMemorySize(const std::string &layerId) const;
+
+  // Factory: parse from JSON file; falls back to defaults() on any error
+  static NetronomeSpec load(llvm::StringRef path);
+  // Factory: exact replica of the original hardcoded NetronomePerformanceModel
+  static NetronomeSpec defaults();
+};
+
 // performance model
 class PerformanceModel {
  public:
@@ -112,32 +151,58 @@ class FPGAPerformanceModel : public PerformanceModel {
    }
 };
 
-// Netronome Model
+// Netronome Model — reads from NetronomeSpec (JSON or hardcoded defaults)
 class NetronomePerformanceModel : public PerformanceModel {
+  NetronomeSpec spec_;
  public:
-   int getAccessOverhead(ep2::GlobalOp globalOp) override { return 0; }
-   int getLatency(ep2::FuncOp funcOp) override {
-     int latency = 0;
-     funcOp.walk([&](Operation *op) {
-       llvm::TypeSwitch<Operation *>(op)
-           .Case<ep2::LookupOp, ep2::UpdateOp>(
-               [&](Operation *) { latency += 100; })
-           .Case<ep2::AddOp, ep2::SubOp>([&](Operation *) { latency += 1; })
-           .Case<ep2::EmitOp, ep2::ExtractOp>(
-               [&](Operation *) { latency += 1; });
-     });
-     return latency;
-   }
-   int getCommunicationCost(std::vector<std::string> &froms,
-                            std::vector<std::string> &tos) override {
-     return 0;
-   }
-   int getLatencyTarget() override { return 100; }
-   std::vector<std::string> getComputeUnits() override {
-    return {"cu0", "cu1", "cu2", "cu3", "cu4", "cu5", "cu6",
-            "cu9", "cu10", "cu11", "cu12", "cu13", "cu14", "cu15",
-            "cu16", "cu17", "cu18", "cu19", "cu20", "cu21", "cu22", "cu23"};
-   }
+  // Default constructor: preserves original hardcoded behaviour
+  NetronomePerformanceModel() : spec_(NetronomeSpec::defaults()) {}
+  // Spec-file constructor: loads JSON, falls back to defaults on error
+  explicit NetronomePerformanceModel(llvm::StringRef specPath)
+      : spec_(NetronomeSpec::load(specPath)) {}
+
+  int getAccessOverhead(ep2::GlobalOp globalOp) override { return 0; }
+
+  int getLatency(ep2::FuncOp funcOp) override {
+    int latency = 0;
+    funcOp.walk([&](Operation *op) {
+      llvm::TypeSwitch<Operation *>(op)
+          .Case<ep2::LookupOp, ep2::UpdateOp>(
+              [&](Operation *) { latency += spec_.getInstrLatency("lookup"); })
+          .Case<ep2::AddOp, ep2::SubOp>(
+              [&](Operation *) { latency += spec_.getInstrLatency("add"); })
+          .Case<ep2::EmitOp, ep2::ExtractOp>(
+              [&](Operation *) { latency += spec_.getInstrLatency("emit"); });
+    });
+    return latency;
+  }
+
+  int getCommunicationCost(std::vector<std::string> &froms,
+                           std::vector<std::string> &tos) override {
+    // No island info available → return 0 (same as original default)
+    if (froms.empty() || tos.empty())
+      return 0;
+    auto fi = spec_.meIsland.find(froms[0]);
+    auto ti = spec_.meIsland.find(tos[0]);
+    if (fi == spec_.meIsland.end() || ti == spec_.meIsland.end())
+      return 0;
+    return (fi->second == ti->second) ? spec_.intraIslandCost
+                                      : spec_.interIslandCost;
+  }
+
+  int getLatencyTarget() override { return spec_.latencyTarget; }
+
+  std::vector<std::string> getComputeUnits() override {
+    return spec_.computeUnitIds;
+  }
+
+  // Memory layer accessors for future traffic-aware state placement
+  int     getMemoryLatency(const std::string &layerId) {
+    return spec_.getMemoryLatency(layerId);
+  }
+  int64_t getMemorySize(const std::string &layerId) {
+    return spec_.getMemorySize(layerId);
+  }
 };
 // Generic json model
 

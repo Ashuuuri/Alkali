@@ -41,9 +41,15 @@ esac
 
 
 # Cut-Mapping Optimization
+NETRONOME_SPEC="${NETRONOME_SPEC:-tests/specs/netronome.json}"
+SPEC_OPT=""
+if [ -f "$NETRONOME_SPEC" ]; then
+  SPEC_OPT=" spec=$NETRONOME_SPEC"
+fi
+
 if [ "$disable_cut" != "disable_cut" ]; then
-  ./build/bin/ep2c-opt -ep2-pipeline-handler="mode=loop target=netronome" \
-    "netronome_out/commonopt.mlir" -o "netronome_out/cut.mlir" 
+  ./build/bin/ep2c-opt -ep2-pipeline-handler="mode=loop target=netronome${SPEC_OPT}" \
+    "netronome_out/commonopt.mlir" -o "netronome_out/cut.mlir"
 else
   echo "Warning: cut optimization is disabled, skipping cut optimization"
   cp "netronome_out/commonopt.mlir" "netronome_out/cut.mlir"
