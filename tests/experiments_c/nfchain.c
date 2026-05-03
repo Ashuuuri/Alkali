@@ -240,6 +240,9 @@ void NET_RECV__process_packet(buf_t packet) {
     bufemit(packet, &meta_header2);
 
     // L4 load balancer
+    // Pre-initialize entry with allocation defaults before lookup:
+    //   on miss: pre-init values are kept (new allocation)
+    //   on hit:  stored values overwrite pre-init (sticky assignment)
     BITS(16) src_port;
     src_port = tcp_header.sport;
     BITS(32) base_ip_src;
@@ -251,15 +254,15 @@ void NET_RECV__process_packet(buf_t packet) {
     BITS(16) base_port_dst;
     base_port_dst = 60;
     struct lb_DIP_entries_t lb_DIP_entry;
-    table_lookup(&lb_table, &src_port, &lb_DIP_entry);
     lb_DIP_entry.if_alloc = 1;
-    lb_DIP_entry.mac_src =  lb_DIP_entry.mac_src + fid;
-    lb_DIP_entry.mac_dst =  lb_DIP_entry.mac_dst + fid;
+    lb_DIP_entry.mac_src = fid;
+    lb_DIP_entry.mac_dst = fid;
     lb_DIP_entry.ip_src = base_ip_src + fid;
     lb_DIP_entry.ip_dst = base_ip_dst + fid;
     lb_DIP_entry.port_src = base_port_src + fid;
     lb_DIP_entry.port_dst = base_port_dst + fid;
     lb_DIP_entry.hash = base_ip_src + base_ip_dst + base_port_src + base_port_dst + fid;
+    table_lookup(&lb_table, &src_port, &lb_DIP_entry);
     table_update(&lb_table, &src_port, &lb_DIP_entry);
 
     BITS(32) new_fid;

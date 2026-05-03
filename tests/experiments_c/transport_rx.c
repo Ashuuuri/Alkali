@@ -116,12 +116,12 @@ void NET_RECV__process_packet(buf_t packet) {
     tcp_header.ack = flow_state.rx_next_seq;
     tcp_header.win = flow_state.rx_avail;
 
-    struct buf_tag packet_out;
-    bufemit(&packet_out, &eth_header);
-    bufemit(&packet_out, &ip_header);
-    bufemit(&packet_out, &tcp_header);
-    bufemit(&packet_out, packet);
+    buf_t packet_out = bufinit();
+    bufemit(packet_out, &eth_header);
+    bufemit(packet_out, &ip_header);
+    bufemit(packet_out, &tcp_header);
+    bufemit(packet_out, packet);
 
-    EXT__NET_SEND__net_send(&packet_out);
+    EXT__NET_SEND__net_send(packet_out);
   // }
 }
