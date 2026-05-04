@@ -55,10 +55,6 @@ using PolicyP = std::shared_ptr<PipelinePolicy>;
 using SearchPair = std::pair<ep2::FuncOp, PolicyP>;
 using SearchDirection = llvm::DenseMap<ep2::FuncOp, PolicyP>;
 
-// A list of pipeline policies
-std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc,
-                                                    llvm::DenseMap<mlir::Operation*, int> tableMemMap,
-                                                    double avgPktBytes = 64.0);
 bool isTableClean(ep2::FuncOp funcOp);
 
 void kcutPolicy(Operation * moduleOp, int k, FuncOp targetFunc);
@@ -125,7 +121,9 @@ class PerformanceModel {
   virtual int getLatencyTarget() = 0;
   virtual std::vector<std::string> getComputeUnits() = 0;
   virtual int getActiveFlows() { return 0; }  // 0 = no limit
+  virtual double getAvgPktBytes() { return 64.0; }
   virtual llvm::DenseMap<mlir::Operation*, int> getTableMemMap(ep2::FuncOp) { return {}; }
+  virtual int getInstrLatency(const std::string &opName) { return 1; }
 
   // This function provides a simple, greedy mapping method for a sequence of handlers
   virtual MappingResult
@@ -165,6 +163,41 @@ class NetronomePerformanceModel : public PerformanceModel {
   // Pipeline-level placement cache: populated by getMapping() before per-stage
   // getLatency() calls so that all stages share the same LMEM/CLS/CTM budget.
   llvm::DenseMap<mlir::Operation*, int> globalTableMemMap_;
+
+  struct TierInfo { int latencyCycles; int64_t remaining; };
+
+  llvm::SmallVector<TierInfo> buildTiers() {
+    llvm::SmallVector<TierInfo> tiers;
+    for (auto &layer : spec_.memoryLayers)
+      tiers.push_back({layer.latencyCycles, layer.sizeBytes});
+    llvm::sort(tiers, [](const TierInfo &a, const TierInfo &b) {
+      return a.latencyCycles < b.latencyCycles;
+    });
+    return tiers;
+  }
+
+  // Assigns each table to the fastest tier with remaining capacity.
+  // Parallel to tableSizes — returns one latency per entry.  Modifies tiers in place.
+  llvm::SmallVector<int>
+  cascadePlacement(llvm::SmallVector<TierInfo> &tiers,
+                   llvm::ArrayRef<int64_t> tableSizes) {
+    assert(!tiers.empty() && "cascadePlacement requires at least one memory tier");
+    llvm::SmallVector<int> result;
+    int slowest = tiers.back().latencyCycles;
+    for (int64_t sz : tableSizes) {
+      int lat = slowest;
+      for (auto &tier : tiers) {
+        if (sz <= tier.remaining) {
+          tier.remaining -= sz;
+          lat = tier.latencyCycles;
+          break;
+        }
+      }
+      result.push_back(lat);
+    }
+    return result;
+  }
+
  public:
   // Default constructor: preserves original hardcoded behaviour
   NetronomePerformanceModel()
@@ -179,7 +212,7 @@ class NetronomePerformanceModel : public PerformanceModel {
 
   int getAccessOverhead(ep2::GlobalOp globalOp) override { return 0; }
 
-  // Returns the size of one table entry in bytes from a GlobalImportOp.
+ private:
   int64_t getTableBytes(ep2::GlobalImportOp importOp) {
     auto tableType =
         importOp.getOutput().getType().dyn_cast<ep2::TableType>();
@@ -200,10 +233,6 @@ class NetronomePerformanceModel : public PerformanceModel {
     return static_cast<int64_t>(numEntries) * ((entryBits + 7) / 8);
   }
 
-  // Assigns each unique table in funcOp to a memory tier by cascading through
-  // all layers in the spec from fastest to slowest, respecting each tier's
-  // capacity limit.
-  //
   // Placement priority:
   //   hotKeyRatio == 0: sort by size ascending (small tables fill fast tiers first).
   //   hotKeyRatio >  0: sort by access density descending (opCount / sizeBytes).
@@ -212,20 +241,9 @@ class NetronomePerformanceModel : public PerformanceModel {
   llvm::DenseMap<mlir::Operation *, int>
   buildTableMemMap(ep2::FuncOp funcOp, double hotKeyRatio = 0.0) {
     llvm::DenseMap<mlir::Operation *, int> result;
-
     if (spec_.memoryLayers.empty())
       return result;
 
-    // Build ordered tier list: fastest first, each with remaining capacity.
-    struct TierInfo { int latencyCycles; int64_t remaining; };
-    llvm::SmallVector<TierInfo> tiers;
-    for (auto &layer : spec_.memoryLayers)
-      tiers.push_back({layer.latencyCycles, layer.sizeBytes});
-    llvm::sort(tiers, [](const TierInfo &a, const TierInfo &b) {
-      return a.latencyCycles < b.latencyCycles;
-    });
-
-    // Collect unique tables with size and op-access count.
     struct TableEntry {
       ep2::GlobalImportOp importOp;
       int64_t sizeBytes;
@@ -260,24 +278,16 @@ class NetronomePerformanceModel : public PerformanceModel {
       });
     }
 
-    // Cascade: assign each table to the fastest tier with remaining capacity.
-    int slowestLatency = tiers.back().latencyCycles;
-    for (auto &entry : tables) {
-      int latency = slowestLatency;
-      for (auto &tier : tiers) {
-        if (entry.sizeBytes <= tier.remaining) {
-          tier.remaining -= entry.sizeBytes;
-          latency = tier.latencyCycles;
-          break;
-        }
-      }
-      llvm::errs() << "[TimeMem] table " << entry.sizeBytes << "B (ops="
-                   << entry.opCount << ") -> " << latency << "c\n";
-      result[entry.importOp] = latency;
-    }
+    llvm::SmallVector<int64_t> sizes;
+    for (auto &e : tables) sizes.push_back(e.sizeBytes);
+    auto tiers = buildTiers();
+    auto latencies = cascadePlacement(tiers, sizes);
+    for (size_t i = 0; i < tables.size(); i++)
+      result[tables[i].importOp] = latencies[i];
     return result;
   }
 
+ public:
   // Returns Time_Instr + Time_Mem for the handler.
   // Time_Comm is excluded — it is mapping-dependent and computed separately
   // via getCommunicationCost.
@@ -297,9 +307,6 @@ class NetronomePerformanceModel : public PerformanceModel {
       // memoryLayers is empty (defaults() path).  In a multi-stage pipeline
       // this gives each stage a fresh full budget and ignores other stages'
       // tables, producing incorrect placement.  Call getMapping() instead.
-      if (!spec_.memoryLayers.empty())
-        llvm::errs() << "[WARNING] getLatency called without prior getMapping; "
-                        "placement may be incorrect for multi-stage pipelines\n";
       perStageMap = buildTableMemMap(funcOp, workload_.hotKeyRatio);
       tableMemMap = &perStageMap;
     }
@@ -379,27 +386,31 @@ class NetronomePerformanceModel : public PerformanceModel {
   }
 
   int getActiveFlows() override { return workload_.activeFlows; }
+  double getAvgPktBytes() override { return workload_.avgPktBytes; }
+
+  int getInstrLatency(const std::string &opName) override {
+    return spec_.getInstrLatency(opName);
+  }
 
   llvm::DenseMap<mlir::Operation*, int> getTableMemMap(ep2::FuncOp funcOp) override {
-    if (!globalTableMemMap_.empty())
-      return globalTableMemMap_;
+    if (!globalTableMemMap_.empty()) {
+      llvm::DenseMap<mlir::Operation*, int> result;
+      funcOp.walk([&](ep2::GlobalImportOp importOp) {
+        auto it = globalTableMemMap_.find(importOp);
+        if (it != globalTableMemMap_.end())
+          result[importOp] = it->second;
+      });
+      return result;
+    }
     return buildTableMemMap(funcOp, workload_.hotKeyRatio);
   }
 
-  // Builds a placement map covering all tables across all pipeline stages,
-  // treating LMEM/CLS/CTM as shared budgets.  Stored in globalTableMemMap_ so
-  // subsequent getLatency() and getTableMemMap() calls use consistent placement.
+ private:
+  // Builds pipeline-level placement across all stages with shared tier budgets;
+  // deduplicates tables by name, stores results in globalTableMemMap_.
   void buildGlobalTableMemMap(HandlerPipeline &pipeline) {
     globalTableMemMap_.clear();
     if (spec_.memoryLayers.empty()) return;
-
-    struct TierInfo { int latencyCycles; int64_t remaining; };
-    llvm::SmallVector<TierInfo> tiers;
-    for (auto &layer : spec_.memoryLayers)
-      tiers.push_back({layer.latencyCycles, layer.sizeBytes});
-    llvm::sort(tiers, [](const TierInfo &a, const TierInfo &b) {
-      return a.latencyCycles < b.latencyCycles;
-    });
 
     // Deduplicate tables by name so that post-cut sub-stages sharing the same
     // physical table (via separate GlobalImportOps) don't inflate the budget.
@@ -444,22 +455,13 @@ class NetronomePerformanceModel : public PerformanceModel {
       });
     }
 
-    // Assign placement per unique table name.
+    llvm::SmallVector<int64_t> sizes;
+    for (auto &e : tables) sizes.push_back(e.sizeBytes);
+    auto tiers = buildTiers();
+    auto latencies = cascadePlacement(tiers, sizes);
     llvm::StringMap<int> nameToLatency;
-    int slowestLatency = tiers.back().latencyCycles;
-    for (auto &entry : tables) {
-      int latency = slowestLatency;
-      for (auto &tier : tiers) {
-        if (entry.sizeBytes <= tier.remaining) {
-          tier.remaining -= entry.sizeBytes;
-          latency = tier.latencyCycles;
-          break;
-        }
-      }
-      llvm::errs() << "[GlobalTimeMem] " << entry.name << " " << entry.sizeBytes
-                   << "B (ops=" << entry.opCount << ") -> " << latency << "c\n";
-      nameToLatency[entry.name] = latency;
-    }
+    for (size_t i = 0; i < tables.size(); i++)
+      nameToLatency[tables[i].name] = latencies[i];
 
     // Back-fill every GlobalImportOp in the pipeline using the name-based map.
     for (auto funcOp : pipeline) {
@@ -471,6 +473,7 @@ class NetronomePerformanceModel : public PerformanceModel {
     }
   }
 
+ public:
   MappingResult getMapping(HandlerPipeline &pipeline) override {
     buildGlobalTableMemMap(pipeline);
     // globalTableMemMap_ intentionally NOT cleared here so that the
@@ -489,6 +492,10 @@ class NetronomePerformanceModel : public PerformanceModel {
   }
 };
 // Generic json model
+
+// A list of pipeline policies
+std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc,
+                                                    PerformanceModel *model = nullptr);
 
 // Loop based searching
 static const int PIPELINE_EXTRA_SEARCH = 10;
@@ -554,18 +561,14 @@ class PipelineCutExplorer {
 
 class BottleneckExplorer : public PipelineCutExplorer {
   public:
-    double avgPktBytes = 64.0;
     PerformanceModel* model = nullptr;
 
     BottleneckExplorer() = default;
-    BottleneckExplorer(double avgPkt, PerformanceModel* m)
-        : avgPktBytes(avgPkt), model(m) {}
+    BottleneckExplorer(PerformanceModel* m) : model(m) {}
 
     std::vector<HandlerPipeline> next(HandlerPipeline &pipeline, int bottleneckIndex) override {
         // first try table cut, if it is not working, try kcut
-        auto tableMemMap = model ? model->getTableMemMap(pipeline[bottleneckIndex])
-                                 : llvm::DenseMap<mlir::Operation*, int>{};
-        auto [success, newFuncs] = tableCut(pipeline[bottleneckIndex], tableMemMap, avgPktBytes);
+        auto [success, newFuncs] = tableCut(pipeline[bottleneckIndex], model);
         if (success) {
             auto newPipeline = pipeline;
 
