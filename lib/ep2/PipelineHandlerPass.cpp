@@ -846,7 +846,7 @@ struct NetronomeKCutPolicy : public PipelinePolicy {
         .Case<ep2::ExtractOp, ep2::EmitOp>([&](Operation *) {
           return static_cast<int>(1.0 + ctx.avgPktBytes / 8.0);
         })
-        .Case([&](ep2::GlobalImportOp) { return 0; })
+        .Case([&](ep2::GlobalImportOp) { return 1; })
         .Default([&](Operation *) { return 1; });
   }
 
