@@ -222,10 +222,17 @@ PerformanceModel::getMapping(llvm::SmallVector<ep2::FuncOp> &ops) {
     unitMap[idx] = {};
 
   int flowCap = getActiveFlows();
-  for (auto unit : units) {
-    // Max-deficit-first: assign the next CU to whichever stage has the
-    // largest per-replica latency excess over the target.  This prevents
-    // early stages from monopolising the CU pool and starving later stages.
+  auto unitIt = units.begin();
+
+  // Phase 1: guarantee every stage at least one CU so downstream code always
+  // sees a non-empty instance list.  Respects the non-table-clean constraint
+  // (those stages are already capped at 1 replica, so 1 is fine).
+  for (int idx = 0; idx < ops.size() && unitIt != units.end(); idx++)
+    unitMap[idx].push_back(*unitIt++);
+
+  // Phase 2: max-deficit-first for remaining CUs.  Assigns the next CU to
+  // whichever stage has the largest per-replica latency excess over the target.
+  for (; unitIt != units.end(); ++unitIt) {
     int bestIdx = -1;
     double bestDeficit = 0;
 
@@ -252,7 +259,7 @@ PerformanceModel::getMapping(llvm::SmallVector<ep2::FuncOp> &ops) {
     if (bestIdx < 0)
       break;
 
-    unitMap[bestIdx].push_back(unit);
+    unitMap[bestIdx].push_back(*unitIt);
   }
 
   int targetIndex = 0, maxLatency = 0;

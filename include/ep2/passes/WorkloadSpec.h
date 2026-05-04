@@ -12,7 +12,7 @@ namespace ep2 {
 struct WorkloadSpec {
   double pps = 0;           // target packets per second (0 = not specified)
   double avgPktBytes = 64;  // average packet size in bytes
-  int activeFlows = 1024;   // number of active flows
+  int activeFlows = 0;      // number of active flows (0 = no limit)
   double hotKeyRatio = 0.0; // fraction of lookups hitting fast memory
 
   static WorkloadSpec load(llvm::StringRef path);
