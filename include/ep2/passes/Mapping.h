@@ -293,6 +293,13 @@ class NetronomePerformanceModel : public PerformanceModel {
     if (!globalTableMemMap_.empty()) {
       tableMemMap = &globalTableMemMap_;
     } else {
+      // Per-stage fallback: correct only for single-stage pipelines or when
+      // memoryLayers is empty (defaults() path).  In a multi-stage pipeline
+      // this gives each stage a fresh full budget and ignores other stages'
+      // tables, producing incorrect placement.  Call getMapping() instead.
+      if (!spec_.memoryLayers.empty())
+        llvm::errs() << "[WARNING] getLatency called without prior getMapping; "
+                        "placement may be incorrect for multi-stage pipelines\n";
       perStageMap = buildTableMemMap(funcOp, workload_.hotKeyRatio);
       tableMemMap = &perStageMap;
     }
