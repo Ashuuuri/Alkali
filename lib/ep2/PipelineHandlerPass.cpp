@@ -815,30 +815,20 @@ bool pipelineHandler(ep2::FuncOp funcOp, PipelinePolicy* policy, PipelineResult*
 struct NetronomeKCutPolicy : public PipelinePolicy {
   int numCuts;
   double avgPktBytes;
-  llvm::DenseMap<mlir::Operation*, int> tableMemMap;
+  double hotKeyRatio;
   NetronomeKCutPolicy(int k, double tolerance = 0.1,
                       double avgPkt = 64.0,
-                      llvm::DenseMap<mlir::Operation*, int> map = {})
+                      double hotKey = 0.0)
       : PipelinePolicy(1.0f / k, tolerance), numCuts(k),
-        avgPktBytes(avgPkt), tableMemMap(std::move(map)) {}
-
+        avgPktBytes(avgPkt), hotKeyRatio(hotKey) {}
 
   int valueWeight(mlir::Value v) override {
     return 1;
   }
   int operationWeight(mlir::Operation* op) override {
     return llvm::TypeSwitch<Operation *, int>(op)
-        .Case<ep2::LookupOp>([&](ep2::LookupOp lookupOp) {
-          int memCost = 0;
-          if (auto importOp = lookupOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
-            memCost = tableMemMap.lookup(importOp);
-          return 100 + memCost;
-        })
-        .Case<ep2::UpdateOp>([&](ep2::UpdateOp updateOp) {
-          int memCost = 0;
-          if (auto importOp = updateOp.getTable().getDefiningOp<ep2::GlobalImportOp>())
-            memCost = tableMemMap.lookup(importOp);
-          return 100 + memCost;
+        .Case<ep2::LookupOp, ep2::UpdateOp>([&](Operation *) {
+          return static_cast<int>(hotKeyRatio * 20.0 + (1.0 - hotKeyRatio) * 100.0);
         })
         .Case<ep2::ExtractOp, ep2::EmitOp>([&](Operation *) {
           return static_cast<int>(1.0 + avgPktBytes / 8.0);
@@ -882,8 +872,8 @@ struct NetronomeKCutPolicy : public PipelinePolicy {
     double localTol = tolerance;
     localTol = tolerance / (1 - 1.0 / (numCuts));
 
-    auto source = std::make_shared<NetronomeKCutPolicy>(newCuts, localTol, avgPktBytes, tableMemMap);
-    auto sink = std::make_shared<NetronomeKCutPolicy>(newCuts, localTol, avgPktBytes, tableMemMap);
+    auto source = std::make_shared<NetronomeKCutPolicy>(newCuts, localTol, avgPktBytes, hotKeyRatio);
+    auto sink = std::make_shared<NetronomeKCutPolicy>(newCuts, localTol, avgPktBytes, hotKeyRatio);
 
     bool noCutSource = result.sourceWeight < 1.0f / numCuts + localTol;
     source->done = newCuts == 1 || noCutSource;
@@ -1051,7 +1041,7 @@ bool isTableClean(ep2::FuncOp funcOp) {
 }
 
 std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc,
-                                                    llvm::DenseMap<mlir::Operation*, int> tableMemMap,
+                                                    double hotKeyRatio,
                                                     double avgPktBytes) {
   // build searching sequence
   SmallVector<std::pair<float, float>> cutParams;
@@ -1067,14 +1057,14 @@ std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc,
   for (auto [sourceWeight, tol] : cutParams) {
     SearchDirection sd;
     sd[targetFunc] =
-      std::make_shared<NetronomeKCutPolicy>(2, tol, avgPktBytes, tableMemMap);
+      std::make_shared<NetronomeKCutPolicy>(2, tol, avgPktBytes, hotKeyRatio);
     sd[targetFunc]->sourceWeight = sourceWeight;
 
     auto cuts = stepSearch(sd);
     assert(cuts.size() == 1 && "tableCut: expect only one cut");
     sd = cuts[0];
 
-    for (auto &[func, policy] : sd) 
+    for (auto &[func, policy] : sd)
       valid = valid || isTableClean(func);
     llvm::errs() << "Finish table cut: tol=" << tol <<
       " sourceWeight=" << sourceWeight <<
@@ -1302,7 +1292,7 @@ void PipelineHandlerPass::runOnOperation() {
       signalPassFailure();
       return;
     }
-    BottleneckExplorer explorer(wspec.avgPktBytes, model.get());
+    BottleneckExplorer explorer(wspec.avgPktBytes, wspec.hotKeyRatio);
     PipelineMapper mapper(std::move(model));
 
     optimizationLoop(targetFunc, mapper, explorer);

@@ -57,7 +57,7 @@ using SearchDirection = llvm::DenseMap<ep2::FuncOp, PolicyP>;
 
 // A list of pipeline policies
 std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc,
-                                                    llvm::DenseMap<mlir::Operation*, int> tableMemMap,
+                                                    double hotKeyRatio = 0.0,
                                                     double avgPktBytes = 64.0);
 bool isTableClean(ep2::FuncOp funcOp);
 
@@ -125,7 +125,7 @@ class PerformanceModel {
   virtual int getLatencyTarget() = 0;
   virtual std::vector<std::string> getComputeUnits() = 0;
   virtual int getActiveFlows() { return 0; }  // 0 = no limit
-  virtual llvm::DenseMap<mlir::Operation*, int> getTableMemMap(ep2::FuncOp) { return {}; }
+  virtual double getHotKeyRatio() { return 0.0; }
 
   // This function provides a simple, greedy mapping method for a sequence of handlers
   virtual MappingResult
@@ -372,9 +372,7 @@ class NetronomePerformanceModel : public PerformanceModel {
 
   int getActiveFlows() override { return workload_.activeFlows; }
 
-  llvm::DenseMap<mlir::Operation*, int> getTableMemMap(ep2::FuncOp funcOp) override {
-    return buildTableMemMap(funcOp, workload_.hotKeyRatio);
-  }
+  double getHotKeyRatio() override { return workload_.hotKeyRatio; }
 
   // Memory layer accessors for future traffic-aware state placement
   int     getMemoryLatency(const std::string &layerId) {
@@ -451,17 +449,15 @@ class PipelineCutExplorer {
 class BottleneckExplorer : public PipelineCutExplorer {
   public:
     double avgPktBytes = 64.0;
-    PerformanceModel* model = nullptr;
+    double hotKeyRatio = 0.0;
 
     BottleneckExplorer() = default;
-    BottleneckExplorer(double avgPkt, PerformanceModel* m)
-        : avgPktBytes(avgPkt), model(m) {}
+    BottleneckExplorer(double avgPkt, double hotKey)
+        : avgPktBytes(avgPkt), hotKeyRatio(hotKey) {}
 
     std::vector<HandlerPipeline> next(HandlerPipeline &pipeline, int bottleneckIndex) override {
         // first try table cut, if it is not working, try kcut
-        auto tableMemMap = model ? model->getTableMemMap(pipeline[bottleneckIndex])
-                                 : llvm::DenseMap<mlir::Operation*, int>{};
-        auto [success, newFuncs] = tableCut(pipeline[bottleneckIndex], tableMemMap, avgPktBytes);
+        auto [success, newFuncs] = tableCut(pipeline[bottleneckIndex], hotKeyRatio, avgPktBytes);
         if (success) {
             auto newPipeline = pipeline;
 
