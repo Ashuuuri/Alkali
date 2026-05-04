@@ -818,6 +818,8 @@ struct NetronomeKCutContext {
   int updateInstrCost  = 1;
   int extractInstrCost = 1;
   int emitInstrCost    = 1;
+  int addInstrCost     = 1;
+  int subInstrCost     = 1;
   llvm::DenseMap<mlir::Operation*, int> tableMemMap;
 };
 
@@ -851,6 +853,8 @@ struct NetronomeKCutPolicy : public PipelinePolicy {
         .Case<ep2::EmitOp>([&](Operation *) {
           return static_cast<int>(ctx.emitInstrCost + ctx.avgPktBytes / 8.0);
         })
+        .Case<ep2::AddOp>([&](Operation *) { return ctx.addInstrCost; })
+        .Case<ep2::SubOp>([&](Operation *) { return ctx.subInstrCost; })
         .Case([&](ep2::GlobalImportOp) { return 1; })
         .Default([&](Operation *) { return 1; });
   }
@@ -1067,6 +1071,8 @@ std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc,
   int updateInstrCost   = model ? model->getInstrLatency("update")  : 1;
   int extractInstrCost  = model ? model->getInstrLatency("extract") : 1;
   int emitInstrCost     = model ? model->getInstrLatency("emit")    : 1;
+  int addInstrCost      = model ? model->getInstrLatency("add")     : 1;
+  int subInstrCost      = model ? model->getInstrLatency("sub")     : 1;
   // build searching sequence
   SmallVector<std::pair<float, float>> cutParams;
   for (int j = 5; j >= 0; j--) // first search tolerance
@@ -1077,11 +1083,13 @@ std::pair<bool, SmallVector<ep2::FuncOp>> tableCut(ep2::FuncOp targetFunc,
     cutParams.push_back({i / 10.0f, i / 10.0f});
 
   NetronomeKCutContext baseCtx;
-  baseCtx.avgPktBytes     = avgPktBytes;
+  baseCtx.avgPktBytes      = avgPktBytes;
   baseCtx.lookupInstrCost  = lookupInstrCost;
   baseCtx.updateInstrCost  = updateInstrCost;
   baseCtx.extractInstrCost = extractInstrCost;
   baseCtx.emitInstrCost    = emitInstrCost;
+  baseCtx.addInstrCost     = addInstrCost;
+  baseCtx.subInstrCost     = subInstrCost;
   baseCtx.tableMemMap = std::move(tableMemMap);
 
   bool valid = false;
