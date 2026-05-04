@@ -86,35 +86,6 @@ struct l3sw_meta_t {
   BITS_FIELD(32, dst_ip);
 };
 
-// Branchless MAC rewrite
-static inline void
-rewrite_mac_branchless(struct eth_header_t *eth,
-                       BITS(32) egress_port,
-                       BITS(32) mac_rewrite) {
-  BITS(32) m32   = mac_rewrite;
-  BITS(32) inv32 = (BITS(32))1 - m32;
-
-  BITS(16) m16   = (BITS(16))m32;
-  BITS(16) inv16 = (BITS(16))1 - m16;
-
-  BITS(32) new_mac_1 = (BITS(32))0x02000000;
-  BITS(16) new_mac_2 = (BITS(16))egress_port;
-
-  eth->dst_mac_1 = eth->dst_mac_1 * inv32 + new_mac_1 * m32;
-  eth->src_mac_1 = eth->src_mac_1 * inv32 + new_mac_1 * m32;
-
-  {
-    BITS(16) dst2 = (BITS(16))eth->dst_mac_2;
-    BITS(16) src2 = (BITS(16))eth->src_mac_2;
-
-    dst2 = dst2 * inv16 + new_mac_2 * m16;
-    src2 = src2 * inv16 + new_mac_2 * m16;
-
-    eth->dst_mac_2 = dst2;
-    eth->src_mac_2 = src2;
-  }
-}
-
 void NET_RECV__process_packet(buf_t packet) {
 
   // 0) Ingress meta
@@ -172,8 +143,23 @@ void NET_RECV__process_packet(buf_t packet) {
   // 3C) Mode select
   BITS(32) egress_port = em_port * use_em + lpm_port * use_lpm;
 
-  // 4) MAC rewrite
-  rewrite_mac_branchless(&eth, egress_port, cfg.mac_rewrite);
+  // 4) MAC rewrite (branchless, inlined)
+  {
+    BITS(32) m32   = cfg.mac_rewrite;
+    BITS(32) inv32 = (BITS(32))1 - m32;
+    BITS(16) m16   = (BITS(16))m32;
+    BITS(16) inv16 = (BITS(16))1 - m16;
+    BITS(32) new_mac_1 = (BITS(32))0x02000000;
+    BITS(16) new_mac_2 = (BITS(16))egress_port;
+    eth.dst_mac_1 = eth.dst_mac_1 * inv32 + new_mac_1 * m32;
+    eth.src_mac_1 = eth.src_mac_1 * inv32 + new_mac_1 * m32;
+    BITS(16) dst2 = (BITS(16))eth.dst_mac_2;
+    BITS(16) src2 = (BITS(16))eth.src_mac_2;
+    dst2 = dst2 * inv16 + new_mac_2 * m16;
+    src2 = src2 * inv16 + new_mac_2 * m16;
+    eth.dst_mac_2 = dst2;
+    eth.src_mac_2 = src2;
+  }
   bufemit(packet, (void*)&eth);
 
   // 5) Stats
